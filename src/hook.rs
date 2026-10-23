@@ -44,6 +44,14 @@ pub struct RepoWorktree {
     pub path: String,
 }
 
+/// The status change a start drafts for approval; `None` when no status is configured.
+pub fn start_update(status: Option<&str>) -> Option<Update> {
+    Some(Update {
+        comment: String::new(),
+        status: Some(status?.to_string()),
+    })
+}
+
 /// The spec-first flow of one task: write the spec, review it, implement it, finish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

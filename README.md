@@ -22,15 +22,16 @@ A [herdr](https://herdr.dev) plugin for ClickUp:
   the same branch, one AGENTS.md, one workspace and one agent. A spec start creates only the repo that
   holds the change; `i` adds the worktrees that `repos.txt` lists. One repo behaves as before.
 - **Code now** (`c`): the same worktree (or task folder) and agent, but the agent gets the whole
-  ticket and starts coding; the task moves to *in progress*.
+  ticket and starts coding; a move to *in progress* is drafted for your approval.
 - **Add a repo** (`A`) to a running multi-repo task, and **close a task** (`X`) to remove every
   worktree and its folder. Close asks first and lists repos with uncommitted changes.
 - If the agent asks something at startup (e.g. "trust this folder?"), answer it in the new
   workspace; the plugin waits and then sends the task. It never answers for you.
-- **Report back, only with your approval**: when the agent finishes its turn, the plugin drafts a
-  ClickUp update ("spec drafted" for a spec start; "finished" plus a move to *review* for a code start)
-  and shows a herdr notification. **Nothing is posted automatically.** On the board the task gets a ✉;
-  press `u` to read the exact comment and status, `⏎` to post it, `d` to discard it, `esc` to decide later.
+- **Every ClickUp write is a draft, only with your approval**: a start drafts its status change
+  ("in progress", or the spec status), and a finish drafts a comment plus a status ("spec drafted" for a
+  spec start; "implementation done" plus a move to *review* for a code start). **Nothing is posted
+  automatically.** On the board the task gets a ✉; press `u` to read the exact comment and status, `⏎`
+  to post it, `d` to discard it, `esc` to decide later. A status-only draft posts no comment.
 - **Links**: Ctrl-click an `app.clickup.com/t/...` link in a terminal to open the task.
 
 ## Install
@@ -57,9 +58,11 @@ EOF
 | `CLICKUP_TEAM_ID` | first workspace | ClickUp workspace (team) id |
 | `CLICKUP_SPACE_IDS` | all spaces | Comma-separated space ids the board shows (the number after `/s/` in a space URL) |
 | `CLICKUP_AGENT` | claude | Agent offered first until you pick one |
-| `CLICKUP_STATUS_STARTED` | `in progress` | Status set on start; empty to skip |
-| `CLICKUP_STATUS_DONE` | `review` | Status set when a code start's agent is done; empty to skip |
-| `CLICKUP_STATUS_SPEC` | (none) | Status set when a spec start begins and when its spec is drafted |
+| `CLICKUP_STATUS_STARTED` | `in progress` | Status drafted when a code start begins; empty to skip |
+| `CLICKUP_STATUS_DONE` | `review` | Status drafted when a code start's agent is done; empty to skip |
+| `CLICKUP_STATUS_SPEC` | (none) | Status drafted when a spec start begins and when its spec is drafted |
+
+A status is never set directly. The plugin drafts it, and posts it only when you approve the draft.
 
 Status names are per ClickUp space; a status that does not exist is skipped with a warning
 (see `herdr plugin log list --plugin ssk090.clickup`).

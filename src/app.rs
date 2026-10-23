@@ -4,7 +4,7 @@ use crate::{
     clickup::ClickUp,
     config::Config,
     herdr,
-    hook::{Link, Phase, RepoWorktree, Update},
+    hook::{Link, Phase, RepoWorktree, Update, start_update},
     openspec, repos, store,
     task::{Task, agent_name, branch_name},
     taskspace,
@@ -150,6 +150,13 @@ pub fn start(
         Mode::Spec => Phase::SpecDrafting,
         Mode::Code => Phase::Implementing,
     };
+    let pending = start_update(match mode {
+        Mode::Spec => cfg.status_spec.as_deref(),
+        Mode::Code => cfg.status_started.as_deref(),
+    });
+    if let Some(status) = pending.as_ref().and_then(|u| u.status.as_deref()) {
+        notes.push(format!("status \"{status}\" is drafted for approval"));
+    }
     let link = Link {
         task_id: task.id.clone(),
         branch: branch.clone(),
@@ -162,7 +169,7 @@ pub fn start(
         agent: agent.to_string(),
         working: false,
         reported: false,
-        pending: None,
+        pending,
     };
     store::update(|state| state.panes.insert(pane_id.clone(), link))?;
     if let Err(e) = herdr::start_agent(&agent_name(task), agent, &pane_id) {
@@ -177,13 +184,6 @@ pub fn start(
     }
     herdr::prompt_agent(&pane_id, &prompt)?;
 
-    let status = match mode {
-        Mode::Spec => cfg.status_spec.as_deref(),
-        Mode::Code => cfg.status_started.as_deref(),
-    };
-    if let Some(warning) = set_status(cu, &task.id, status) {
-        notes.push(warning);
-    }
     let names: Vec<String> = worktrees
         .iter()
         .map(|w| taskspace::repo_name(&w.repo))
@@ -415,12 +415,24 @@ pub fn open_url(url: &str) -> Result<()> {
 
 /// Posts an update the user approved: the comment, then the status. Called only from an explicit user action.
 pub fn post_update(cu: &ClickUp, task_id: &str, update: &Update) -> Result<String> {
-    cu.comment(task_id, &update.comment)?;
-    let mut summary = format!("posted the comment on {task_id}");
+    let mut summary = String::new();
+    if !update.comment.trim().is_empty() {
+        cu.comment(task_id, &update.comment)?;
+        summary.push_str(&format!("posted the comment on {task_id}"));
+    }
     if let Some(warning) = set_status(cu, task_id, update.status.as_deref()) {
-        summary.push_str(&format!(" ({warning})"));
+        if !summary.is_empty() {
+            summary.push_str(", ");
+        }
+        summary.push_str(&warning);
     } else if let Some(s) = &update.status {
-        summary.push_str(&format!(" and set it to {s}"));
+        if !summary.is_empty() {
+            summary.push_str(" and ");
+        }
+        summary.push_str(&format!("set it to {s}"));
+    }
+    if summary.is_empty() {
+        summary = format!("nothing to post on {task_id}");
     }
     clear_pending(task_id)?;
     Ok(summary)

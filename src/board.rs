@@ -1193,9 +1193,15 @@ fn draw_update(f: &mut Frame, task: &Task, update: &Update) {
     let mut text = vec![
         Line::from(format!("Post this to ClickUp task \"{}\"?", task.name)).bold(),
         Line::from(""),
-        Line::from("Comment:").dim(),
-        Line::from(update.comment.clone()),
     ];
+    if update.comment.trim().is_empty() {
+        text.push(Line::from("Status only, no comment.").dim());
+    } else {
+        text.extend([
+            Line::from("Comment:").dim(),
+            Line::from(update.comment.clone()),
+        ]);
+    }
     if let Some(s) = &update.status {
         text.extend([
             Line::from(""),

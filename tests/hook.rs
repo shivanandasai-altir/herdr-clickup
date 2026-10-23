@@ -1,5 +1,5 @@
 use herdr_clickup::hook::{
-    Decision, Link, Phase, RepoWorktree, State, Update, decide, proposed_update,
+    Decision, Link, Phase, RepoWorktree, State, Update, decide, proposed_update, start_update,
 };
 use serde_json::json;
 
@@ -374,4 +374,16 @@ fn links_with_repos_survive_a_json_round_trip() {
     let back: Link = serde_json::from_str(&text).unwrap();
     assert_eq!(back, l);
     assert_eq!(back.worktrees.len(), 2);
+}
+
+#[test]
+fn a_start_drafts_a_status_only_update() {
+    assert_eq!(
+        start_update(Some("in progress")),
+        Some(Update {
+            comment: String::new(),
+            status: Some("in progress".into())
+        })
+    );
+    assert_eq!(start_update(None), None);
 }
