@@ -92,7 +92,7 @@ workspace's repository.
 
 ## CLI
 
-`bin/run.sh list` prints your tasks; `bin/run.sh start [--code] <task-id> [agent] [repo]` starts one without the picker (spec first unless `--code`).
+`bin/run.sh list` prints your tasks; `bin/run.sh start [--code] <task-id> [agent] [repo[,repo]]` starts one without the picker (spec first unless `--code`). The picker and the clicked-task pane ask for one or more repos.
 
 ## Develop
 

@@ -1,7 +1,7 @@
 use herdr_clickup::hook::RepoWorktree;
 use herdr_clickup::taskspace::{
-    add_repo, add_worktrees, base_ref, dirty, read_repos, remove_worktrees, repo_name, task_dir,
-    unique_name, write_agents_md, write_repos,
+    add_repo, add_worktrees, base_ref, dirty, dirty_dir, read_repos, remove_worktrees, repo_name,
+    same_repo, task_dir, unique_name, write_agents_md, write_repos,
 };
 use std::{
     fs,
@@ -239,4 +239,16 @@ fn a_worktree_starts_from_the_remote_default_branch() {
         .unwrap();
     assert_eq!(head.stdout, remote.stdout);
     assert!(remove_worktrees(&added).is_empty());
+}
+
+#[test]
+fn dirty_dir_and_same_repo_see_a_real_checkout() {
+    let root = temp("dirty-dir");
+    let r = root.join("repo");
+    repo(&r);
+    let path = r.display().to_string();
+    assert!(!dirty_dir(&path));
+    fs::write(r.join("new.txt"), "x").unwrap();
+    assert!(dirty_dir(&path));
+    assert!(same_repo(&format!("{path}/"), &path));
 }

@@ -10,7 +10,7 @@ use crate::{
     taskspace,
     ticket::{apply_prompt, code_prompt, spec_prompt, ticket_markdown},
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use std::{fs, path::Path, process::Command};
 
 /// How long a start waits for the user to answer an agent's startup question.
@@ -116,20 +116,23 @@ pub fn start(
             let change = branch.to_lowercase();
             let change_dir = openspec::new_change(host_dir, &change, &task.name)?;
             fs::write(change_dir.join("clickup.md"), ticket_markdown(&ticket))?;
-            taskspace::write_repos(&change_dir, repos)?;
             let dir_path = Path::new(&dir);
             let ticket_rel = relative(dir_path, &change_dir.join("clickup.md"));
-            let repos_rel = relative(dir_path, &change_dir.join("repos.txt"));
             let mut prompt = spec_prompt(task, &change, &ticket_rel);
-            let host_rel = relative(dir_path, Path::new(&host));
-            if host_rel != "." {
+            // A single-repo start keeps today's worktree and has no list to grow.
+            if multi {
+                taskspace::write_repos(&change_dir, repos)?;
+                let repos_rel = relative(dir_path, &change_dir.join("repos.txt"));
+                let host_rel = relative(dir_path, Path::new(&host));
+                if host_rel != "." {
+                    prompt.push_str(&format!(
+                        "\n\nThe OpenSpec change lives in `{host_rel}`. Run every `openspec` command from `{host_rel}`."
+                    ));
+                }
                 prompt.push_str(&format!(
-                    "\n\nThe OpenSpec change lives in `{host_rel}`. Run every `openspec` command from `{host_rel}`."
+                    "\n\nThe repos this task can touch are in {repos_rel}: one absolute path per line. Edit that list so it holds exactly the repos the change affects; implementation creates a worktree for each. You may read the other repos listed there to judge impact, but do not change code in any repo."
                 ));
             }
-            prompt.push_str(&format!(
-                "\n\nThe repos this task can touch are in {repos_rel}: one absolute path per line. Edit that list so it holds exactly the repos the change affects; implementation creates a worktree for each. You may read the other repos listed there to judge impact, but do not change code in any repo."
-            ));
             (prompt, Some(change))
         }
     };
@@ -235,11 +238,18 @@ pub fn implement(pane_id: &str, change: &str) -> Result<String> {
             .join("changes")
             .join(change);
         let repos = taskspace::read_repos(&change_dir)?;
-        let added =
-            taskspace::add_worktrees(Path::new(folder), &repos, &link.branch, &link.worktrees)?;
-        if !added.is_empty() {
+        for repo in repos {
+            let added = taskspace::add_worktrees(
+                Path::new(folder),
+                std::slice::from_ref(&repo),
+                &link.branch,
+                &all,
+            )?;
+            if added.is_empty() {
+                continue;
+            }
             all.extend(added.clone());
-            // Record the new worktrees before anything else can fail, so close can remove them.
+            // Record each new worktree at once, so a later failure still lets close remove it.
             store::update(|state| {
                 if let Some(l) = state.panes.get_mut(pane_id) {
                     l.worktrees.extend(added);
@@ -350,10 +360,18 @@ pub struct ClosePreview {
 
 pub fn close_preview(task_id: &str) -> Result<ClosePreview> {
     let (_, link) = find_link(task_id)?;
+    let mut dirty = taskspace::dirty(&link.worktrees);
+    // Links written before worktrees were stored only have their checkout folder.
+    if link.worktrees.is_empty()
+        && let Some(dir) = &link.dir
+        && taskspace::dirty_dir(dir)
+    {
+        dirty.push(dir.clone());
+    }
     Ok(ClosePreview {
         branch: link.branch.clone(),
         folder: link.folder().map(str::to_string),
-        dirty: taskspace::dirty(&link.worktrees),
+        dirty,
         worktrees: link.worktrees.clone(),
     })
 }
@@ -376,7 +394,12 @@ pub fn close_task(task_id: &str) -> Result<String> {
             if !failed.is_empty() {
                 bail!("could not remove every worktree: {}", failed.join("; "));
             }
-            fs::remove_dir_all(folder).with_context(|| format!("removing task folder {folder}"))?;
+            if let Err(e) = fs::remove_dir_all(folder) {
+                // A folder removed by hand is already closed.
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    return Err(anyhow!("removing task folder {folder}: {e}"));
+                }
+            }
             let _ = herdr::close_workspace(&workspace);
         } else {
             herdr::remove_worktree_workspace(&workspace)?;

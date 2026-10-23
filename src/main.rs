@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow, bail};
-use dialoguer::{FuzzySelect, Select};
+use dialoguer::{FuzzySelect, MultiSelect, Select};
 use herdr_clickup::{
     app::{self, Mode, NO_AGENT, NO_REPO, agent_options, client, open_url, repo_options},
     board,
@@ -10,10 +10,11 @@ use herdr_clickup::{
     link::task_id_from_url,
     report, store,
     task::Task,
+    taskspace,
 };
 use std::{env, io::BufRead};
 
-const USAGE: &str = "usage: herdr-clickup <board|tasks|link|picker|task|list|start [--code] <id> [agent] [repo]|hook>";
+const USAGE: &str = "usage: herdr-clickup <board|tasks|link|picker|task|list|start [--code] <id> [agent] [repo[,repo]]|hook>";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -85,13 +86,18 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
                     .next()
                     .ok_or_else(|| anyhow!(NO_AGENT))?,
             };
-            let repo = match rest.get(2) {
-                Some(r) => r.clone(),
-                None => repo_options()
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow!(NO_REPO))?,
+            let repos: Vec<String> = match rest.get(2) {
+                Some(r) => r
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                None => repo_options().into_iter().take(1).collect(),
             };
+            if repos.is_empty() {
+                bail!(NO_REPO);
+            }
             println!(
                 "{}",
                 app::start(
@@ -99,7 +105,7 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
                     &cu,
                     &cu.task(id)?,
                     &agent,
-                    &[repo],
+                    &repos,
                     mode,
                     &|m| println!("{m}")
                 )?
@@ -167,26 +173,26 @@ fn task_menu(cfg: &Config, cu: &ClickUp, task: &Task) -> Result<()> {
     if repos.is_empty() {
         bail!(NO_REPO);
     }
-    let Some(r) = Select::new()
-        .with_prompt("Repo")
+    let defaults: Vec<bool> = (0..repos.len()).map(|i| i == 0).collect();
+    let Some(picked) = MultiSelect::new()
+        .with_prompt("Repos (space toggles)")
         .items(&repos)
-        .default(0)
+        .defaults(&defaults)
         .interact_opt()?
     else {
         return Ok(());
     };
-    println!("Starting {} in {}…", agents[a], repos[r]);
+    if picked.is_empty() {
+        return Ok(());
+    }
+    let selected: Vec<String> = picked.into_iter().map(|i| repos[i].clone()).collect();
+    let names: Vec<String> = selected.iter().map(|r| taskspace::repo_name(r)).collect();
+    println!("Starting {} in {}…", agents[a], names.join(", "));
     println!(
         "{}",
-        app::start(
-            cfg,
-            cu,
-            task,
-            &agents[a],
-            &[repos[r].clone()],
-            mode,
-            &|m| println!("{m}")
-        )?
+        app::start(cfg, cu, task, &agents[a], &selected, mode, &|m| println!(
+            "{m}"
+        ))?
     );
     Ok(())
 }

@@ -572,12 +572,12 @@ impl Board {
                         }
                     }
                     KeyCode::Enter => {
-                        let chosen = picked_repos(&choices, &picked);
-                        if chosen.is_empty() {
-                            self.status = "pick at least one repo (space)".into();
-                        } else {
-                            return self.start(task, mode, &agent, chosen);
-                        }
+                        return self.start(
+                            task,
+                            mode,
+                            &agent,
+                            chosen_repos(&choices, &picked, sel),
+                        );
                     }
                     KeyCode::Esc | KeyCode::Char('q') => return,
                     _ => {}
@@ -822,8 +822,7 @@ impl Board {
         if choices.is_empty() {
             self.status = NO_REPO.into();
         } else {
-            let mut picked = vec![false; choices.len()];
-            picked[0] = true;
+            let picked = vec![false; choices.len()];
             self.modal = Modal::Repo {
                 task,
                 mode,
@@ -869,7 +868,12 @@ impl Board {
             return;
         }
         let mut choices = app::repo_options();
-        choices.retain(|r| !link.worktrees.iter().any(|w| &w.repo == r));
+        choices.retain(|r| {
+            !link
+                .worktrees
+                .iter()
+                .any(|w| taskspace::same_repo(&w.repo, r))
+        });
         if choices.is_empty() {
             self.status = "every open repo is already in this task".into();
         } else {
@@ -990,9 +994,9 @@ impl Board {
                     })
                     .collect();
                 let title = if *mode == Mode::Spec {
-                    " Repos for this spec · space pick · first holds the spec · ⏎ start "
+                    " Repos for this spec · space marks · ⏎ starts · first marked holds the spec "
                 } else {
-                    " Repos to work in · space pick · ⏎ start "
+                    " Repos · space marks · ⏎ starts · no marks starts the highlighted "
                 };
                 draw_choices(f, title, &labels, *sel)
             }
@@ -1234,6 +1238,16 @@ fn picked_repos(choices: &[String], picked: &[bool]) -> Vec<String> {
         .collect()
 }
 
+/// The repos to start: the marked ones, or the highlighted repo when none are marked. This keeps
+/// the old "move, Enter" single-repo behavior and lets space build a multi-repo selection.
+fn chosen_repos(choices: &[String], picked: &[bool], sel: usize) -> Vec<String> {
+    let mut chosen = picked_repos(choices, picked);
+    if chosen.is_empty() {
+        chosen.extend(choices.get(sel).cloned());
+    }
+    chosen
+}
+
 fn draw_close(f: &mut Frame, task: &Task, preview: &app::ClosePreview) {
     let area = centered(f.area(), 70, 50);
     let mut text = vec![
@@ -1251,6 +1265,7 @@ fn draw_close(f: &mut Frame, task: &Task, preview: &app::ClosePreview) {
     }
     if let Some(folder) = &preview.folder {
         text.push(Line::from(format!("Removes folder: {folder}")).dim());
+        text.push(Line::from("Files at the task-folder root are removed too.").dim());
     }
     if preview.dirty.is_empty() {
         text.push(Line::from("No uncommitted changes.").fg(Color::Green));
@@ -1330,7 +1345,15 @@ fn toggle(set: &mut HashSet<String>, key: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::picked_repos;
+    use super::{chosen_repos, picked_repos};
+
+    #[test]
+    fn enter_without_a_mark_starts_the_highlighted_repo() {
+        let choices = ["/w/webui".to_string(), "/w/api".to_string()];
+        assert_eq!(chosen_repos(&choices, &[false, false], 1), ["/w/api"]);
+        assert_eq!(chosen_repos(&choices, &[true, false], 1), ["/w/webui"]);
+        assert!(chosen_repos(&[], &[], 0).is_empty());
+    }
 
     #[test]
     fn multi_select_returns_the_marked_repos_in_picker_order() {

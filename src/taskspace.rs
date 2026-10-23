@@ -25,7 +25,8 @@ pub fn repo_name(repo: &str) -> String {
         .unwrap_or_else(|| "repo".into())
 }
 
-fn same_repo(a: &str, b: &str) -> bool {
+/// Whether two paths name the same repo or checkout. Symlinks and trailing slashes do not matter.
+pub fn same_repo(a: &str, b: &str) -> bool {
     let canon = |p: &str| fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
     canon(a) == canon(b)
 }
@@ -114,7 +115,7 @@ pub fn add_worktrees(
 pub fn remove_worktrees(worktrees: &[RepoWorktree]) -> Vec<String> {
     let mut failed = Vec::new();
     for w in worktrees {
-        // Already removed by an earlier attempt: nothing left to do.
+        // Already removed by an earlier attempt: prune below clears its record.
         if !Path::new(&w.path).exists() {
             continue;
         }
@@ -122,17 +123,26 @@ pub fn remove_worktrees(worktrees: &[RepoWorktree]) -> Vec<String> {
             failed.push(format!("{}: {e:#}", w.repo));
         }
     }
+    let mut repos: Vec<&str> = worktrees.iter().map(|w| w.repo.as_str()).collect();
+    repos.sort_unstable();
+    repos.dedup();
+    for repo in repos {
+        let _ = git(repo, &["worktree", "prune"]);
+    }
     failed
+}
+
+/// Whether a checkout has uncommitted or untracked changes.
+pub fn dirty_dir(dir: &str) -> bool {
+    git_output(dir, &["status", "--porcelain"])
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
 /// Repos with uncommitted or untracked changes.
 pub fn dirty(worktrees: &[RepoWorktree]) -> Vec<String> {
     worktrees
         .iter()
-        .filter(|w| {
-            git_output(&w.path, &["status", "--porcelain"])
-                .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
-        })
+        .filter(|w| dirty_dir(&w.path))
         .map(|w| w.repo.clone())
         .collect()
 }
