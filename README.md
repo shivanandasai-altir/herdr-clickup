@@ -5,6 +5,7 @@ A [herdr](https://herdr.dev) plugin for ClickUp:
 - **Board** (`prefix+u`): a tab with your current sprints and every space → folder → list on the left,
   and the selected list's tasks on the right.
   `↑↓`/`jk` move · `⏎` open/expand · `s` start · `o` open in browser · `/` filter · `m` only mine ·
+  `a` pick an assignee (everyone, me, unassigned, or anyone in the list) ·
   `tab` switch side · `r` refresh · `q` quit.
 - **My tasks** (`prefix+shift+u`): a quick fuzzy picker over your open tasks, in a popup.
 - **Start**: asks which coding agent to use (the installed ones herdr supports: claude, codex, pi, …;

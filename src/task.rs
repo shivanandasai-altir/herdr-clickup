@@ -98,15 +98,46 @@ pub fn agent_name(t: &Task) -> String {
     format!("cu-{id}").chars().take(32).collect()
 }
 
-/// Tasks whose name or id contains every word of `query` (any case), assigned to `mine` when given.
-pub fn filter_tasks<'a>(tasks: &'a [Task], query: &str, mine: Option<u64>) -> Vec<&'a Task> {
+/// Tasks whose name or id contains every word of `query` (any case), assigned as `who` says.
+pub fn filter_tasks<'a>(tasks: &'a [Task], query: &str, who: Who) -> Vec<&'a Task> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     tasks
         .iter()
-        .filter(|t| mine.is_none_or(|me| t.assignees.iter().any(|a| a.id == me)))
+        .filter(|t| match who {
+            Who::Anyone => true,
+            Who::Person(id) => t.is_assigned_to(id),
+            Who::Nobody => t.assignees.is_empty(),
+        })
         .filter(|t| {
             let hay = format!("{} {}", t.id, t.name).to_lowercase();
             words.iter().all(|w| hay.contains(w))
         })
         .collect()
+}
+
+/// Whose tasks to show.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Who {
+    Anyone,
+    Person(u64),
+    Nobody,
+}
+
+/// Everyone assigned to any of `tasks`, with how many tasks each has: busiest first, then by name.
+pub fn assignees_in(tasks: &[Task]) -> Vec<(Assignee, usize)> {
+    let mut out: Vec<(Assignee, usize)> = Vec::new();
+    for a in tasks.iter().flat_map(|t| &t.assignees) {
+        match out.iter_mut().find(|(o, _)| o.id == a.id) {
+            Some((_, n)) => *n += 1,
+            None => out.push((a.clone(), 1)),
+        }
+    }
+    out.sort_by(|(a, n), (b, m)| m.cmp(n).then_with(|| a.username.to_lowercase().cmp(&b.username.to_lowercase())));
+    out
+}
+
+impl Task {
+    pub fn is_assigned_to(&self, user_id: u64) -> bool {
+        self.assignees.iter().any(|a| a.id == user_id)
+    }
 }

@@ -129,7 +129,7 @@ mod agent {
 
 mod filter {
     use super::task;
-    use herdr_clickup::task::{filter_tasks, Assignee, Task};
+    use herdr_clickup::task::{assignees_in, filter_tasks, Assignee, Task, Who};
 
     fn tasks() -> Vec<Task> {
         let mut a = task("86a", "Add VAT number to invoice", "");
@@ -146,21 +146,37 @@ mod filter {
 
     #[test]
     fn empty_query_keeps_everything() {
-        assert_eq!(ids(filter_tasks(&tasks(), "  ", None)), ["86a", "86b", "86c"]);
+        assert_eq!(ids(filter_tasks(&tasks(), "  ", Who::Anyone)), ["86a", "86b", "86c"]);
     }
 
     #[test]
     fn every_word_must_match_name_or_id_case_insensitively() {
         let t = tasks();
-        assert_eq!(ids(filter_tasks(&t, "INVOICE", None)), ["86a", "86b"]);
-        assert_eq!(ids(filter_tasks(&t, "invoice vat", None)), ["86a"]);
-        assert_eq!(ids(filter_tasks(&t, "86c", None)), ["86c"]);
+        assert_eq!(ids(filter_tasks(&t, "INVOICE", Who::Anyone)), ["86a", "86b"]);
+        assert_eq!(ids(filter_tasks(&t, "invoice vat", Who::Anyone)), ["86a"]);
+        assert_eq!(ids(filter_tasks(&t, "86c", Who::Anyone)), ["86c"]);
     }
 
     #[test]
-    fn mine_keeps_tasks_assigned_to_that_user() {
+    fn a_person_keeps_tasks_assigned_to_them() {
         let t = tasks();
-        assert_eq!(ids(filter_tasks(&t, "", Some(1))), ["86a"]);
-        assert_eq!(ids(filter_tasks(&t, "login", Some(1))), Vec::<&str>::new());
+        assert_eq!(ids(filter_tasks(&t, "", Who::Person(1))), ["86a"]);
+        assert_eq!(ids(filter_tasks(&t, "", Who::Person(2))), ["86b"]);
+        assert_eq!(ids(filter_tasks(&t, "login", Who::Person(1))), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn nobody_keeps_unassigned_tasks() {
+        assert_eq!(ids(filter_tasks(&tasks(), "", Who::Nobody)), ["86c"]);
+    }
+
+    #[test]
+    fn assignees_are_listed_once_with_counts_busiest_first_then_by_name() {
+        let mut t = tasks();
+        let mut d = task("86d", "Another", "");
+        d.assignees = vec![Assignee { id: 2, username: "jd".into() }, Assignee { id: 3, username: "Ak".into() }];
+        t.push(d);
+        let got: Vec<(String, usize)> = assignees_in(&t).into_iter().map(|(a, n)| (a.username, n)).collect();
+        assert_eq!(got, [("jd".to_string(), 2), ("Ak".to_string(), 1), ("me".to_string(), 1)]);
     }
 }

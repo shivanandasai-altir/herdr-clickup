@@ -5,7 +5,7 @@ use crate::{
     clickup::ClickUp,
     config::Config,
     hierarchy::{current_sprints, ListRef},
-    task::{filter_tasks, Task},
+    task::{assignees_in, filter_tasks, Task, Who},
 };
 use anyhow::Result;
 use ratatui::{
@@ -80,6 +80,8 @@ enum Modal {
     Detail,
     /// Holds the task itself: the table can reload while the modal is open.
     Agent { task: Task, choices: Vec<String>, sel: usize },
+    /// Whose tasks to show: everyone, me, unassigned, or one person.
+    Who { choices: Vec<(String, Who)>, sel: usize },
     /// Second step of a start: the agent is chosen, now the repo.
     Repo { task: Task, agent: String, choices: Vec<String>, sel: usize },
 }
@@ -108,7 +110,9 @@ struct Board {
     focus: Focus,
     filter: String,
     filtering: bool,
-    mine_only: bool,
+    /// Whose tasks the table shows, and its label for the title (empty for everyone).
+    who: Who,
+    who_label: String,
     modal: Modal,
     status: String,
     /// Tasks being started, so a second `s` cannot start a second worktree.
@@ -159,7 +163,8 @@ impl Board {
             focus: Focus::Side,
             filter: String::new(),
             filtering: false,
-            mine_only: false,
+            who: Who::Anyone,
+            who_label: String::new(),
             modal: Modal::None,
             status: String::new(),
             starting: HashSet::new(),
@@ -315,7 +320,7 @@ impl Board {
 
     fn visible_tasks(&self) -> Vec<&Task> {
         let all = self.tasks.get(&self.source.key()).map(Vec::as_slice).unwrap_or_default();
-        filter_tasks(all, &self.filter, if self.mine_only { self.me } else { None })
+        filter_tasks(all, &self.filter, self.who)
     }
 
     fn selected_task(&self) -> Option<Task> {
@@ -349,6 +354,22 @@ impl Board {
                     _ => {}
                 }
                 self.modal = Modal::Agent { task, choices, sel };
+                return;
+            }
+            Modal::Who { choices, mut sel } => {
+                match k.code {
+                    KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(choices.len().saturating_sub(1)),
+                    KeyCode::Enter => {
+                        let (label, who) = choices[sel].clone();
+                        // "jd (2)" -> "jd"; everyone needs no label.
+                        let name = label.rsplit_once(" (").map_or(label.as_str(), |(n, _)| n).to_string();
+                        return self.set_who(who, if who == Who::Anyone { String::new() } else { name });
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => return,
+                    _ => {}
+                }
+                self.modal = Modal::Who { choices, sel };
                 return;
             }
             Modal::Repo { task, agent, choices, mut sel } => {
@@ -389,10 +410,12 @@ impl Board {
             KeyCode::Char('m') if self.me.is_none() => {
                 self.status = "your ClickUp user is not loaded yet; try again in a moment (r reloads)".into();
             }
-            KeyCode::Char('m') => {
-                self.mine_only = !self.mine_only;
-                self.table.select(Some(0));
-            }
+            KeyCode::Char('m') => match (self.who, self.me) {
+                (Who::Person(id), Some(me)) if id == me => self.set_who(Who::Anyone, String::new()),
+                (_, Some(me)) => self.set_who(Who::Person(me), "me".into()),
+                (_, None) => {}
+            },
+            KeyCode::Char('a') => self.choose_who(),
             // The old tasks stay on screen until the new ones arrive, so a failed reload loses nothing.
             KeyCode::Char('r') => {
                 self.status = REFRESHING.into();
@@ -447,6 +470,30 @@ impl Board {
         self.source = source;
         self.table.select(Some(0));
         self.focus = Focus::Tasks;
+    }
+
+    fn set_who(&mut self, who: Who, label: String) {
+        self.who = who;
+        self.who_label = label;
+        self.table.select(Some(0));
+    }
+
+    /// Everyone, me, unassigned, then each person in the current list's tasks with their task count.
+    fn choose_who(&mut self) {
+        let all = self.tasks.get(&self.source.key()).map(Vec::as_slice).unwrap_or_default();
+        let mut choices = vec![(format!("Everyone ({})", all.len()), Who::Anyone)];
+        if let Some(me) = self.me {
+            choices.push((format!("Me ({})", all.iter().filter(|t| t.is_assigned_to(me)).count()), Who::Person(me)));
+        }
+        choices.push((format!("Unassigned ({})", all.iter().filter(|t| t.assignees.is_empty()).count()), Who::Nobody));
+        for (a, n) in assignees_in(all) {
+            if Some(a.id) != self.me {
+                let name = if a.username.is_empty() { format!("user {}", a.id) } else { a.username };
+                choices.push((format!("{name} ({n})"), Who::Person(a.id)));
+            }
+        }
+        let sel = choices.iter().position(|(_, w)| *w == self.who).unwrap_or(0);
+        self.modal = Modal::Who { choices, sel };
     }
 
     fn choose_agent(&mut self) {
@@ -507,6 +554,10 @@ impl Board {
             Modal::None => {}
             Modal::Detail => self.draw_detail(f),
             Modal::Agent { choices, sel, .. } => draw_choices(f, " Start with which agent? ", choices, *sel),
+            Modal::Who { choices, sel } => {
+                let labels: Vec<String> = choices.iter().map(|(l, _)| l.clone()).collect();
+                draw_choices(f, " Show tasks of ", &labels, *sel)
+            }
             Modal::Repo { choices, sel, .. } => {
                 let names: Vec<String> = choices.iter().map(|r| r.rsplit('/').next().unwrap_or(r).to_string()).collect();
                 draw_choices(f, " Worktree in which repo? ", &names, *sel)
@@ -539,7 +590,7 @@ impl Board {
             .iter()
             .map(|t| {
                 let who: Vec<&str> = t.assignees.iter().map(|a| first_name(&a.username)).collect();
-                let mine = me.is_some_and(|me| t.assignees.iter().any(|a| a.id == me));
+                let mine = me.is_some_and(|me| t.is_assigned_to(me));
                 Row::new([
                     Cell::from(t.status.clone()).fg(Color::Cyan),
                     Cell::from(t.name.clone()),
@@ -550,8 +601,8 @@ impl Board {
         let count = tasks.len();
         let loading = self.loading_tasks.contains(&self.source.key());
         let mut title = format!(" {} · {count}", self.source.title());
-        if self.mine_only {
-            title.push_str(" · mine");
+        if !self.who_label.is_empty() {
+            title.push_str(&format!(" · {}", self.who_label));
         }
         if !self.filter.is_empty() {
             title.push_str(&format!(" · \"{}\"", self.filter));
@@ -574,7 +625,7 @@ impl Board {
         } else if !self.status.is_empty() {
             Line::from(format!(" {}", self.status)).fg(Color::Yellow)
         } else {
-            Line::from(" ↑↓ move  ⏎ open  s start  o browser  / filter  m mine  tab switch  r refresh  q quit").dim()
+            Line::from(" ↑↓ move  ⏎ open  s start  o browser  / filter  m mine  a assignee  tab switch  r refresh  q quit").dim()
         };
         f.render_widget(Paragraph::new(line), area);
     }
