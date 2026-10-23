@@ -1,5 +1,6 @@
 use crate::hierarchy::{parse_space_lists, ListRef};
 use crate::task::{parse_task, parse_task_list, Task};
+use crate::ticket::{parse_ticket, Ticket};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
@@ -107,6 +108,13 @@ impl ClickUp {
 
     pub fn task(&self, id: &str) -> Result<Task> {
         parse_task(&self.get(&format!("/task/{id}"))?).ok_or_else(|| anyhow!("task {id} not found"))
+    }
+
+    /// The task with its checklists, subtasks, attachments and comments.
+    pub fn ticket(&self, id: &str) -> Result<Ticket> {
+        let task = self.get(&format!("/task/{id}?include_subtasks=true"))?;
+        let comments = self.get(&format!("/task/{id}/comment"))?;
+        parse_ticket(&task, &comments).ok_or_else(|| anyhow!("task {id} not found"))
     }
 
     pub fn set_status(&self, id: &str, status: &str) -> Result<()> {

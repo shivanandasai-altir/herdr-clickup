@@ -48,6 +48,8 @@ pub fn current_workspace() -> Option<String> {
 pub struct Worktree {
     pub workspace_id: String,
     pub pane_id: String,
+    /// The checkout's folder.
+    pub path: String,
 }
 
 /// Creates a worktree of `repo` on `branch` and opens it in a new workspace.
@@ -57,6 +59,7 @@ pub fn create_worktree(repo: &str, branch: &str, label: &str) -> Result<Worktree
     Ok(Worktree {
         workspace_id: field("/workspace/workspace_id").ok_or_else(|| anyhow!("worktree create: no workspace in {r}"))?,
         pane_id: field("/root_pane/pane_id").ok_or_else(|| anyhow!("worktree create: no root pane in {r}"))?,
+        path: field("/worktree/path").ok_or_else(|| anyhow!("worktree create: no path in {r}"))?,
     })
 }
 

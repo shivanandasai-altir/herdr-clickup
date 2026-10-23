@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, Result};
 use dialoguer::{FuzzySelect, Select};
 use herdr_clickup::{
-    app::{self, agent_options, client, open_url, repo_options, set_status, NO_AGENT, NO_REPO},
+    app::{self, agent_options, client, open_url, repo_options, set_status, Mode, NO_AGENT, NO_REPO},
     board,
     clickup::ClickUp,
     config::Config,
@@ -13,7 +13,8 @@ use herdr_clickup::{
 };
 use std::{env, io::BufRead};
 
-const USAGE: &str = "usage: herdr-clickup <board|tasks|link|picker|task|list|start <id> [agent] [repo]|hook>";
+const USAGE: &str =
+    "usage: herdr-clickup <board|tasks|link|picker|task|list|start [--code] <id> [agent] [repo]|hook>";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -59,6 +60,9 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
             Ok(())
         }
         "start" => {
+            // Spec first unless --code.
+            let mode = if rest.first().map(String::as_str) == Some("--code") { Mode::Code } else { Mode::Spec };
+            let rest = if mode == Mode::Code { &rest[1..] } else { rest };
             let id = rest.first().ok_or_else(|| anyhow!("start needs a task id"))?;
             let (cfg, cu) = client()?;
             let agent = match rest.get(1) {
@@ -69,7 +73,7 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
                 Some(r) => r.clone(),
                 None => repo_options().into_iter().next().ok_or_else(|| anyhow!(NO_REPO))?,
             };
-            println!("{}", app::start(&cfg, &cu, &cu.task(id)?, &agent, &repo, &|m| println!("{m}"))?);
+            println!("{}", app::start(&cfg, &cu, &cu.task(id)?, &agent, &repo, mode, &|m| println!("{m}"))?);
             Ok(())
         }
         "hook" => hook(),
@@ -92,30 +96,30 @@ fn picker() -> Result<()> {
 }
 
 fn task_menu(cfg: &Config, cu: &ClickUp, task: &Task) -> Result<()> {
-    let choices = ["Start: new worktree + agent", "Open in browser", "Cancel"];
-    match Select::new().with_prompt(&task.name).items(choices).default(0).interact_opt()? {
-        Some(0) => {
-            let agents = agent_options(cfg);
-            if agents.is_empty() {
-                bail!(NO_AGENT);
-            }
-            let Some(a) = Select::new().with_prompt("Agent").items(&agents).default(0).interact_opt()? else {
-                return Ok(());
-            };
-            let repos = repo_options();
-            if repos.is_empty() {
-                bail!(NO_REPO);
-            }
-            let Some(r) = Select::new().with_prompt("Repo").items(&repos).default(0).interact_opt()? else {
-                return Ok(());
-            };
-            println!("Starting {} in {}…", agents[a], repos[r]);
-            println!("{}", app::start(cfg, cu, task, &agents[a], &repos[r], &|m| println!("{m}"))?);
-            Ok(())
-        }
-        Some(1) => open_url(&task.url),
-        _ => Ok(()),
+    let choices = ["Write the spec first (OpenSpec)", "Start coding now", "Open in browser", "Cancel"];
+    let mode = match Select::new().with_prompt(&task.name).items(choices).default(0).interact_opt()? {
+        Some(0) => Mode::Spec,
+        Some(1) => Mode::Code,
+        Some(2) => return open_url(&task.url),
+        _ => return Ok(()),
+    };
+    let agents = agent_options(cfg);
+    if agents.is_empty() {
+        bail!(NO_AGENT);
     }
+    let Some(a) = Select::new().with_prompt("Agent").items(&agents).default(0).interact_opt()? else {
+        return Ok(());
+    };
+    let repos = repo_options();
+    if repos.is_empty() {
+        bail!(NO_REPO);
+    }
+    let Some(r) = Select::new().with_prompt("Repo").items(&repos).default(0).interact_opt()? else {
+        return Ok(());
+    };
+    println!("Starting {} in {}…", agents[a], repos[r]);
+    println!("{}", app::start(cfg, cu, task, &agents[a], &repos[r], mode, &|m| println!("{m}"))?);
+    Ok(())
 }
 
 fn hook() -> Result<()> {
@@ -135,10 +139,18 @@ fn hook() -> Result<()> {
         }
         d
     })?;
-    if let Decision::Report { task_id, branch, .. } = decision {
+    if let Decision::Report { task_id, branch, change, .. } = decision {
         let (cfg, cu) = client()?;
-        cu.comment(&task_id, &format!("herdr agent finished its turn on branch `{branch}`."))?;
-        if let Some(warning) = set_status(&cu, &task_id, cfg.status_done.as_deref()) {
+        // A spec-first start ends with a spec to review, not finished work.
+        let (comment, status) = match &change {
+            Some(c) => (
+                format!("Spec drafted: OpenSpec change `{c}` on branch `{branch}` is ready for review."),
+                cfg.status_spec.as_deref(),
+            ),
+            None => (format!("herdr agent finished its turn on branch `{branch}`."), cfg.status_done.as_deref()),
+        };
+        cu.comment(&task_id, &comment)?;
+        if let Some(warning) = set_status(&cu, &task_id, status) {
             eprintln!("warning: {warning}");
         }
         herdr::notify("ClickUp task updated", &format!("{task_id}: agent done on {branch}"));

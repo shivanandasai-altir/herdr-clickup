@@ -5,7 +5,7 @@ fn link(working: bool, reported: bool) -> State {
     let mut s = State::default();
     s.panes.insert(
         "w3:t1:p1".into(),
-        Link { task_id: "86c1abcd".into(), branch: "CU-86c1abcd-fix-login".into(), working, reported },
+        Link { task_id: "86c1abcd".into(), branch: "CU-86c1abcd-fix-login".into(), change: None, working, reported },
     );
     s
 }
@@ -38,6 +38,7 @@ fn done_on_a_linked_pane_reports_the_task() {
             pane_id: "w3:t1:p1".into(),
             task_id: "86c1abcd".into(),
             branch: "CU-86c1abcd-fix-login".into(),
+            change: None,
         }
     );
 }
@@ -104,4 +105,19 @@ fn removing_an_unlinked_worktree_does_nothing() {
     // w30 must not match the w3:… panes.
     let ev = json!({ "event": "worktree_removed", "data": { "workspace_id": "w30" } });
     assert_eq!(decide(&ev, &state(false)), Decision::Nothing);
+}
+
+#[test]
+fn a_spec_start_reports_with_its_change() {
+    let mut s = state(false);
+    s.panes.get_mut("w3:t1:p1").unwrap().change = Some("cu-86c1abcd-fix-login".into());
+    assert_eq!(
+        decide(&status_event("w3:t1:p1", "idle"), &s),
+        Decision::Report {
+            pane_id: "w3:t1:p1".into(),
+            task_id: "86c1abcd".into(),
+            branch: "CU-86c1abcd-fix-login".into(),
+            change: Some("cu-86c1abcd-fix-login".into()),
+        }
+    );
 }

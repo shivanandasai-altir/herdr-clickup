@@ -7,6 +7,9 @@ use std::collections::BTreeMap;
 pub struct Link {
     pub task_id: String,
     pub branch: String,
+    /// The OpenSpec change of a spec-first start; `None` for a start that codes straight away.
+    #[serde(default)]
+    pub change: Option<String>,
     /// The agent has been seen working, so a later idle/done is the end of its turn.
     #[serde(default)]
     pub working: bool,
@@ -26,7 +29,7 @@ pub enum Decision {
     /// The agent took the prompt: from now on idle/done means it finished.
     MarkWorking { pane_id: String },
     /// The agent finished: tell ClickUp, then mark the link reported.
-    Report { pane_id: String, task_id: String, branch: String },
+    Report { pane_id: String, task_id: String, branch: String, change: Option<String> },
     /// The pane is gone: drop its link.
     Forget { pane_id: String },
     /// The workspace's worktree was removed: drop every link to its panes.
@@ -68,6 +71,7 @@ pub fn decide(event: &Value, state: &State) -> Decision {
             pane_id: pane_id.to_string(),
             task_id: link.task_id.clone(),
                 branch: link.branch.clone(),
+                change: link.change.clone(),
             }
         }
         "pane_closed" => Decision::Forget { pane_id: pane_id.to_string() },

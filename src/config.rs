@@ -12,6 +12,8 @@ pub struct Config {
     pub agent: Option<String>,
     pub status_started: Option<String>,
     pub status_done: Option<String>,
+    /// Set when a spec-first start begins and when its spec is drafted; off by default.
+    pub status_spec: Option<String>,
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -53,6 +55,7 @@ impl Config {
             agent: get("CLICKUP_AGENT"),
             status_started: status("CLICKUP_STATUS_STARTED", "in progress"),
             status_done: status("CLICKUP_STATUS_DONE", "review"),
+            status_spec: get("CLICKUP_STATUS_SPEC"),
         })
     }
 }

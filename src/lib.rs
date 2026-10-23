@@ -10,3 +10,5 @@ pub mod agents;
 pub mod app;
 pub mod board;
 pub mod repos;
+pub mod ticket;
+pub mod openspec;

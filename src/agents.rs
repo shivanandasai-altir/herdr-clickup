@@ -19,15 +19,20 @@ pub fn agent_choices(installed: impl Fn(&str) -> bool, preferred: Option<&str>) 
     out
 }
 
-/// Whether `kind`'s executable is on PATH. herdr may start plugins without the login PATH, so the usual
+/// Whether `kind`'s executable is installed. herdr may start plugins without the login PATH, so the usual
 /// install dirs are searched too.
 pub fn is_installed(kind: &str) -> bool {
+    find_executable(kind).is_some()
+}
+
+/// Where executable `name` is: PATH, then the usual install dirs.
+pub fn find_executable(name: &str) -> Option<std::path::PathBuf> {
     use std::{env, path::PathBuf};
     let home = env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let extra = [".local/bin", ".cargo/bin", ".bun/bin", ".npm-global/bin", ".volta/bin"].map(|d| home.join(d));
     let system = ["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from);
     let path = env::var_os("PATH").unwrap_or_default();
-    env::split_paths(&path).chain(extra).chain(system).any(|d| is_executable(&d.join(kind)))
+    env::split_paths(&path).chain(extra).chain(system).map(|d| d.join(name)).find(|p| is_executable(p))
 }
 
 fn is_executable(p: &std::path::Path) -> bool {

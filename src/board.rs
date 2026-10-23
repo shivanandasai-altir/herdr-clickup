@@ -1,7 +1,7 @@
 //! The ClickUp board: a herdr tab with sprints and lists on the left and their tasks on the right.
 //! ClickUp calls run on background threads and report back over a channel, so the UI never blocks.
 use crate::{
-    app::{self, NO_AGENT, NO_REPO},
+    app::{self, Mode, NO_AGENT, NO_REPO},
     clickup::ClickUp,
     config::Config,
     hierarchy::{current_sprints, ListRef},
@@ -79,11 +79,11 @@ enum Modal {
     None,
     Detail,
     /// Holds the task itself: the table can reload while the modal is open.
-    Agent { task: Task, choices: Vec<String>, sel: usize },
+    Agent { task: Task, mode: Mode, choices: Vec<String>, sel: usize },
     /// Whose tasks to show: everyone, me, unassigned, or one person.
     Who { choices: Vec<(String, Who)>, sel: usize },
     /// Second step of a start: the agent is chosen, now the repo.
-    Repo { task: Task, agent: String, choices: Vec<String>, sel: usize },
+    Repo { task: Task, mode: Mode, agent: String, choices: Vec<String>, sel: usize },
 }
 
 #[derive(PartialEq)]
@@ -345,15 +345,15 @@ impl Board {
             return;
         }
         match std::mem::replace(&mut self.modal, Modal::None) {
-            Modal::Agent { task, choices, mut sel } => {
+            Modal::Agent { task, mode, choices, mut sel } => {
                 match k.code {
                     KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
                     KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(choices.len().saturating_sub(1)),
-                    KeyCode::Enter => return self.choose_repo(task, choices[sel].clone()),
+                    KeyCode::Enter => return self.choose_repo(task, mode, choices[sel].clone()),
                     KeyCode::Esc | KeyCode::Char('q') => return,
                     _ => {}
                 }
-                self.modal = Modal::Agent { task, choices, sel };
+                self.modal = Modal::Agent { task, mode, choices, sel };
                 return;
             }
             Modal::Who { choices, mut sel } => {
@@ -372,20 +372,21 @@ impl Board {
                 self.modal = Modal::Who { choices, sel };
                 return;
             }
-            Modal::Repo { task, agent, choices, mut sel } => {
+            Modal::Repo { task, mode, agent, choices, mut sel } => {
                 match k.code {
                     KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
                     KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(choices.len().saturating_sub(1)),
-                    KeyCode::Enter => return self.start(task, &agent, &choices[sel]),
+                    KeyCode::Enter => return self.start(task, mode, &agent, &choices[sel]),
                     KeyCode::Esc | KeyCode::Char('q') => return,
                     _ => {}
                 }
-                self.modal = Modal::Repo { task, agent, choices, sel };
+                self.modal = Modal::Repo { task, mode, agent, choices, sel };
                 return;
             }
             Modal::Detail => {
                 match k.code {
-                    KeyCode::Char('s') => self.choose_agent(),
+                    KeyCode::Char('s') => self.choose_agent(Mode::Spec),
+                    KeyCode::Char('c') => self.choose_agent(Mode::Code),
                     KeyCode::Char('o') => self.open_in_browser(),
                     KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {}
                     _ => self.modal = Modal::Detail,
@@ -457,7 +458,8 @@ impl Board {
             KeyCode::Down | KeyCode::Char('j') => self.table.select(Some((sel + 1).min(n.saturating_sub(1)))),
             KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Side,
             KeyCode::Enter if n > 0 => self.modal = Modal::Detail,
-            KeyCode::Char('s') if n > 0 => self.choose_agent(),
+            KeyCode::Char('s') if n > 0 => self.choose_agent(Mode::Spec),
+            KeyCode::Char('c') if n > 0 => self.choose_agent(Mode::Code),
             KeyCode::Char('o') => self.open_in_browser(),
             _ => {}
         }
@@ -496,7 +498,7 @@ impl Board {
         self.modal = Modal::Who { choices, sel };
     }
 
-    fn choose_agent(&mut self) {
+    fn choose_agent(&mut self, mode: Mode) {
         let Some(task) = self.selected_task() else { return };
         if self.starting.contains(&task.id) {
             self.status = format!("{} is already starting", task.name);
@@ -506,30 +508,31 @@ impl Board {
         if choices.is_empty() {
             self.status = NO_AGENT.into();
         } else {
-            self.modal = Modal::Agent { task, choices, sel: 0 };
+            self.modal = Modal::Agent { task, mode, choices, sel: 0 };
         }
     }
 
-    fn choose_repo(&mut self, task: Task, agent: String) {
+    fn choose_repo(&mut self, task: Task, mode: Mode, agent: String) {
         let choices = app::repo_options();
         if choices.is_empty() {
             self.status = NO_REPO.into();
         } else {
-            self.modal = Modal::Repo { task, agent, choices, sel: 0 };
+            self.modal = Modal::Repo { task, mode, agent, choices, sel: 0 };
         }
     }
 
-    fn start(&mut self, task: Task, agent: &str, repo: &str) {
+    fn start(&mut self, task: Task, mode: Mode, agent: &str, repo: &str) {
         if !self.starting.insert(task.id.clone()) {
             return;
         }
-        self.status = format!("starting {agent} on {}…", task.name);
+        let what = if mode == Mode::Spec { "writing the spec for" } else { "starting" };
+        self.status = format!("{agent}: {what} {}…", task.name);
         let (cfg, cu, tx) = (self.cfg.clone(), self.cu.clone(), self.tx.clone());
         let (agent, repo) = (agent.to_string(), repo.to_string());
         thread::spawn(move || {
             let progress_tx = tx.clone();
             let progress = move |m: String| drop(progress_tx.send(Msg::Progress(m)));
-            let result = app::start(&cfg, &cu, &task, &agent, &repo, &progress);
+            let result = app::start(&cfg, &cu, &task, &agent, &repo, mode, &progress);
             let _ = tx.send(Msg::Started(task.id, result));
         });
     }
@@ -553,7 +556,10 @@ impl Board {
         match &self.modal {
             Modal::None => {}
             Modal::Detail => self.draw_detail(f),
-            Modal::Agent { choices, sel, .. } => draw_choices(f, " Start with which agent? ", choices, *sel),
+            Modal::Agent { choices, sel, mode, .. } => {
+                let title = if *mode == Mode::Spec { " Write the spec with which agent? " } else { " Code with which agent? " };
+                draw_choices(f, title, choices, *sel)
+            }
             Modal::Who { choices, sel } => {
                 let labels: Vec<String> = choices.iter().map(|(l, _)| l.clone()).collect();
                 draw_choices(f, " Show tasks of ", &labels, *sel)
@@ -625,7 +631,7 @@ impl Board {
         } else if !self.status.is_empty() {
             Line::from(format!(" {}", self.status)).fg(Color::Yellow)
         } else {
-            Line::from(" ↑↓ move  ⏎ open  s start  o browser  / filter  m mine  a assignee  tab switch  r refresh  q quit").dim()
+            Line::from(" ↑↓ move  ⏎ open  s write spec  c code now  o browser  / filter  m mine  a assignee  r refresh  q quit").dim()
         };
         f.render_widget(Paragraph::new(line), area);
     }
@@ -642,7 +648,7 @@ impl Board {
             Line::from(t.description.trim().to_string()),
         ];
         f.render_widget(Clear, area);
-        let block = panel(" Task · s start  o browser  esc close ", true);
+        let block = panel(" Task · s write spec  c code now  o browser  esc close ", true);
         f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), area);
     }
 }
