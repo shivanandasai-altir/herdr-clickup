@@ -18,6 +18,9 @@ pub struct Link {
     /// Where the task is in the spec-first flow. Absent in links written before phases existed.
     #[serde(default)]
     pub phase: Option<Phase>,
+    /// The worktree (or task folder) the agent works in; absent in links written before it existed.
+    #[serde(default)]
+    pub dir: Option<String>,
     /// A ClickUp update drafted when the agent finished, waiting for the user to approve or discard it.
     #[serde(default)]
     pub pending: Option<Update>,
@@ -61,11 +64,19 @@ impl Link {
     /// Older links have no phase. A change that was already reported means the spec is drafted; a
     /// change that was not means the spec is still being written; no change means a code start.
     pub fn phase(&self) -> Phase {
-        self.phase.unwrap_or(match (self.change.is_some(), self.reported) {
-            (true, false) => Phase::SpecDrafting,
-            (true, true) => Phase::SpecDrafted,
-            (false, _) => Phase::Implementing,
-        })
+        self.phase
+            .unwrap_or(match (self.change.is_some(), self.reported) {
+                (true, false) => Phase::SpecDrafting,
+                (true, true) => Phase::SpecDrafted,
+                (false, false) => Phase::Implementing,
+                (false, true) => Phase::Done,
+            })
+    }
+
+    /// True when the reviewed spec waits for implementation. The agent's live state is checked
+    /// separately: `working` here only says the agent has worked since the last claim.
+    pub fn can_implement(&self) -> bool {
+        self.change.is_some() && self.phase() == Phase::SpecDrafted
     }
 
     /// Moves the link past a report the user has not approved yet.

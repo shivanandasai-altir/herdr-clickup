@@ -10,6 +10,7 @@ fn link(working: bool, reported: bool) -> State {
             branch: "CU-86c1abcd-fix-login".into(),
             change: None,
             phase: None,
+            dir: None,
             working,
             reported,
             pending: None,
@@ -211,6 +212,9 @@ fn a_link_written_before_phases_existed_reads_its_phase_from_the_change() {
     assert_eq!(spec.phase(), Phase::SpecDrafting);
     let code: Link = serde_json::from_value(json!({ "task_id": "1", "branch": "b" })).unwrap();
     assert_eq!(code.phase(), Phase::Implementing);
+    let done: Link =
+        serde_json::from_value(json!({ "task_id": "1", "branch": "b", "reported": true })).unwrap();
+    assert_eq!(done.phase(), Phase::Done);
     let finished: Link = serde_json::from_value(
         json!({ "task_id": "1", "branch": "b", "change": "c", "reported": true }),
     )
@@ -236,6 +240,7 @@ fn implementing_claims_the_next_finish_again() {
         branch: "b".into(),
         change: Some("c".into()),
         phase: Some(Phase::SpecDrafted),
+        dir: None,
         working: true,
         reported: true,
         pending: Some(Update {
@@ -257,6 +262,7 @@ fn a_report_advances_the_phase() {
         branch: "b".into(),
         change: Some("c".into()),
         phase: Some(Phase::SpecDrafting),
+        dir: None,
         working: true,
         reported: false,
         pending: None,
@@ -280,4 +286,29 @@ fn phases_have_short_board_labels() {
         .map(Phase::label),
         ["spec…", "spec ✓", "code…", "done"]
     );
+}
+
+#[test]
+fn implement_needs_a_reviewed_change() {
+    let mut l = Link {
+        task_id: "1".into(),
+        branch: "b".into(),
+        change: Some("c".into()),
+        phase: Some(Phase::SpecDrafted),
+        dir: None,
+        working: false,
+        reported: true,
+        pending: None,
+    };
+    assert!(l.can_implement());
+    l.working = true;
+    assert!(l.can_implement(), "the stale working flag does not decide");
+    l.working = false;
+    l.phase = Some(Phase::SpecDrafting);
+    assert!(!l.can_implement());
+    l.phase = Some(Phase::Implementing);
+    assert!(!l.can_implement());
+    l.change = None;
+    l.phase = Some(Phase::SpecDrafted);
+    assert!(!l.can_implement());
 }

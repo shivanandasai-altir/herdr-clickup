@@ -105,6 +105,7 @@ pub fn start(
         branch: branch.clone(),
         change: change.clone(),
         phase: Some(phase),
+        dir: Some(wt.path.clone()),
         working: false,
         reported: false,
         pending: None,
@@ -148,14 +149,30 @@ pub fn start(
 /// Sends the apply workflow of an approved change to the agent in `pane_id`, and makes the next finish
 /// report the implementation rather than the spec.
 pub fn implement(pane_id: &str, change: &str) -> Result<String> {
-    // Claim the next finish before the agent starts, so a status event cannot slip in between.
-    store::update(|state| {
-        state
-            .panes
-            .get_mut(pane_id)
-            .into_iter()
-            .for_each(Link::implementing)
+    // A change that does not validate is not approved, however the board got here.
+    if let Some(dir) = store::read().panes.get(pane_id).and_then(|l| l.dir.clone()) {
+        openspec::validate(std::path::Path::new(&dir), change)?;
+    }
+    // The link's `working` flag is stale after a report; ask herdr for the live state.
+    if !matches!(herdr::agent_status(pane_id)?.as_str(), "idle" | "done") {
+        bail!("the agent is still working; wait for it to finish before implementing");
+    }
+    // Claim the next finish while the link is still reviewed; a second `i` claims nothing.
+    let claimed = store::update(|state| {
+        let Some(l) = state.panes.get_mut(pane_id) else {
+            return false;
+        };
+        if !l.can_implement() {
+            return false;
+        }
+        l.implementing();
+        true
     })?;
+    if !claimed {
+        bail!(
+            "the spec agent is still working, or the change is no longer ready; try again when it is idle"
+        );
+    }
     if let Err(e) = herdr::prompt_agent(pane_id, &apply_prompt(change)) {
         let _ = store::update(|state| {
             if let Some(l) = state.panes.get_mut(pane_id) {

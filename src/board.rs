@@ -794,7 +794,7 @@ impl Board {
             self.status = "this is a code start; there is no OpenSpec change to implement".into();
             return;
         };
-        if link.phase() != Phase::SpecDrafted {
+        if !link.can_implement() {
             self.status = format!(
                 "{} cannot be implemented yet ({})",
                 task.name,
@@ -959,7 +959,7 @@ impl Board {
         self.selected_task().is_some_and(|t| {
             self.links
                 .get(&t.id)
-                .is_some_and(|(_, l)| l.change.is_some() && l.phase() == Phase::SpecDrafted)
+                .is_some_and(|(_, l)| l.can_implement())
         })
     }
 
