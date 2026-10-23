@@ -29,10 +29,20 @@ pub enum Decision {
     Report { pane_id: String, task_id: String, branch: String },
     /// The pane is gone: drop its link.
     Forget { pane_id: String },
+    /// The workspace's worktree was removed: drop every link to its panes.
+    ForgetWorkspace { workspace_id: String },
 }
 
 /// What to do about one herdr event (`{ event, data: { pane_id, agent_status, .. } }`).
 pub fn decide(event: &Value, state: &State) -> Decision {
+    if event.get("event").and_then(Value::as_str) == Some("worktree.removed") {
+        let Some(ws) = event.pointer("/data/workspace_id").and_then(Value::as_str) else {
+            return Decision::Nothing;
+        };
+        // Pane ids are `<workspace>:<pane>`.
+        let linked = state.panes.keys().any(|p| p.split(':').next() == Some(ws));
+        return if linked { Decision::ForgetWorkspace { workspace_id: ws.to_string() } } else { Decision::Nothing };
+    }
     let Some(pane_id) = event.pointer("/data/pane_id").and_then(Value::as_str) else {
         return Decision::Nothing;
     };

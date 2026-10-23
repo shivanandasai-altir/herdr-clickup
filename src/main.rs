@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, Result};
 use dialoguer::{FuzzySelect, Select};
 use herdr_clickup::{
-    app::{self, agent_options, client, open_url, set_status, NO_AGENT},
+    app::{self, agent_options, client, open_url, repo_options, set_status, NO_AGENT, NO_REPO},
     board,
     clickup::ClickUp,
     config::Config,
@@ -13,7 +13,7 @@ use herdr_clickup::{
 };
 use std::{env, io::BufRead};
 
-const USAGE: &str = "usage: herdr-clickup <board|tasks|link|picker|task|list|start <id> [agent]|hook>";
+const USAGE: &str = "usage: herdr-clickup <board|tasks|link|picker|task|list|start <id> [agent] [repo]|hook>";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -65,7 +65,11 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
                 Some(a) => a.clone(),
                 None => agent_options(&cfg).into_iter().next().ok_or_else(|| anyhow!(NO_AGENT))?,
             };
-            println!("{}", app::start(&cfg, &cu, &cu.task(id)?, &agent)?);
+            let repo = match rest.get(2) {
+                Some(r) => r.clone(),
+                None => repo_options().into_iter().next().ok_or_else(|| anyhow!(NO_REPO))?,
+            };
+            println!("{}", app::start(&cfg, &cu, &cu.task(id)?, &agent, &repo, &|m| println!("{m}"))?);
             Ok(())
         }
         "hook" => hook(),
@@ -98,8 +102,15 @@ fn task_menu(cfg: &Config, cu: &ClickUp, task: &Task) -> Result<()> {
             let Some(a) = Select::new().with_prompt("Agent").items(&agents).default(0).interact_opt()? else {
                 return Ok(());
             };
-            println!("Starting {}…", agents[a]);
-            println!("{}", app::start(cfg, cu, task, &agents[a])?);
+            let repos = repo_options();
+            if repos.is_empty() {
+                bail!(NO_REPO);
+            }
+            let Some(r) = Select::new().with_prompt("Repo").items(&repos).default(0).interact_opt()? else {
+                return Ok(());
+            };
+            println!("Starting {} in {}…", agents[a], repos[r]);
+            println!("{}", app::start(cfg, cu, task, &agents[a], &repos[r], &|m| println!("{m}"))?);
             Ok(())
         }
         Some(1) => open_url(&task.url),
@@ -118,6 +129,9 @@ fn hook() -> Result<()> {
             Decision::MarkWorking { pane_id } => state.panes.get_mut(pane_id).into_iter().for_each(|l| l.working = true),
             Decision::Report { pane_id, .. } => state.panes.get_mut(pane_id).into_iter().for_each(|l| l.reported = true),
             Decision::Forget { pane_id } => drop(state.panes.remove(pane_id)),
+            Decision::ForgetWorkspace { workspace_id } => {
+                state.panes.retain(|pane, _| pane.split(':').next() != Some(workspace_id.as_str()))
+            }
         }
         d
     })?;

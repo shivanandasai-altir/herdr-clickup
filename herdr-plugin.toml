@@ -39,6 +39,10 @@ command = ["sh", "bin/run.sh", "hook"]
 on = "pane.closed"
 command = ["sh", "bin/run.sh", "hook"]
 
+[[events]]
+on = "worktree.removed"
+command = ["sh", "bin/run.sh", "hook"]
+
 [[panes]]
 id = "board"
 title = "ClickUp"

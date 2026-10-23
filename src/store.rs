@@ -20,13 +20,13 @@ pub fn update<T>(change: impl FnOnce(&mut State) -> T) -> Result<T> {
     Ok(out)
 }
 
-/// The agent kind picked last time, offered first next time.
-pub fn last_agent() -> Option<String> {
-    fs::read_to_string(dir().ok()?.join("agent")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+/// A one-line choice remembered between runs (`agent`, `repo`), offered first next time.
+pub fn last(name: &str) -> Option<String> {
+    fs::read_to_string(dir().ok()?.join(name)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
-pub fn remember_agent(kind: &str) {
+pub fn remember(name: &str, value: &str) {
     if let Ok(d) = dir() {
-        let _ = fs::write(d.join("agent"), kind);
+        let _ = fs::write(d.join(name), value);
     }
 }

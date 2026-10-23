@@ -1,7 +1,7 @@
 //! The ClickUp board: a herdr tab with sprints and lists on the left and their tasks on the right.
 //! ClickUp calls run on background threads and report back over a channel, so the UI never blocks.
 use crate::{
-    app::{self, NO_AGENT},
+    app::{self, NO_AGENT, NO_REPO},
     clickup::ClickUp,
     config::Config,
     hierarchy::{current_sprints, ListRef},
@@ -56,6 +56,8 @@ enum Msg {
     Hierarchy(Result<Hierarchy>),
     Tasks(String, Result<Vec<Task>>),
     Started(String, Result<String>),
+    /// Something the user must do for a start that is still running.
+    Progress(String),
 }
 
 #[derive(Clone)]
@@ -78,6 +80,8 @@ enum Modal {
     Detail,
     /// Holds the task itself: the table can reload while the modal is open.
     Agent { task: Task, choices: Vec<String>, sel: usize },
+    /// Second step of a start: the agent is chosen, now the repo.
+    Repo { task: Task, agent: String, choices: Vec<String>, sel: usize },
 }
 
 #[derive(PartialEq)]
@@ -253,6 +257,7 @@ impl Board {
                     Err(e) => self.status = format!("could not load tasks: {e:#}"),
                 }
             }
+            Msg::Progress(m) => self.status = m,
             Msg::Started(task_id, result) => {
                 self.starting.remove(&task_id);
                 self.status = match result {
@@ -339,11 +344,22 @@ impl Board {
                 match k.code {
                     KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
                     KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(choices.len().saturating_sub(1)),
-                    KeyCode::Enter => return self.start(task, &choices[sel]),
+                    KeyCode::Enter => return self.choose_repo(task, choices[sel].clone()),
                     KeyCode::Esc | KeyCode::Char('q') => return,
                     _ => {}
                 }
                 self.modal = Modal::Agent { task, choices, sel };
+                return;
+            }
+            Modal::Repo { task, agent, choices, mut sel } => {
+                match k.code {
+                    KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(choices.len().saturating_sub(1)),
+                    KeyCode::Enter => return self.start(task, &agent, &choices[sel]),
+                    KeyCode::Esc | KeyCode::Char('q') => return,
+                    _ => {}
+                }
+                self.modal = Modal::Repo { task, agent, choices, sel };
                 return;
             }
             Modal::Detail => {
@@ -447,14 +463,26 @@ impl Board {
         }
     }
 
-    fn start(&mut self, task: Task, agent: &str) {
+    fn choose_repo(&mut self, task: Task, agent: String) {
+        let choices = app::repo_options();
+        if choices.is_empty() {
+            self.status = NO_REPO.into();
+        } else {
+            self.modal = Modal::Repo { task, agent, choices, sel: 0 };
+        }
+    }
+
+    fn start(&mut self, task: Task, agent: &str, repo: &str) {
         if !self.starting.insert(task.id.clone()) {
             return;
         }
         self.status = format!("starting {agent} on {}…", task.name);
-        let (cfg, cu, tx, agent) = (self.cfg.clone(), self.cu.clone(), self.tx.clone(), agent.to_string());
+        let (cfg, cu, tx) = (self.cfg.clone(), self.cu.clone(), self.tx.clone());
+        let (agent, repo) = (agent.to_string(), repo.to_string());
         thread::spawn(move || {
-            let result = app::start(&cfg, &cu, &task, &agent);
+            let progress_tx = tx.clone();
+            let progress = move |m: String| drop(progress_tx.send(Msg::Progress(m)));
+            let result = app::start(&cfg, &cu, &task, &agent, &repo, &progress);
             let _ = tx.send(Msg::Started(task.id, result));
         });
     }
@@ -478,7 +506,11 @@ impl Board {
         match &self.modal {
             Modal::None => {}
             Modal::Detail => self.draw_detail(f),
-            Modal::Agent { choices, sel, .. } => draw_agents(f, choices, *sel),
+            Modal::Agent { choices, sel, .. } => draw_choices(f, " Start with which agent? ", choices, *sel),
+            Modal::Repo { choices, sel, .. } => {
+                let names: Vec<String> = choices.iter().map(|r| r.rsplit('/').next().unwrap_or(r).to_string()).collect();
+                draw_choices(f, " Worktree in which repo? ", &names, *sel)
+            }
         }
     }
 
@@ -564,17 +596,18 @@ impl Board {
     }
 }
 
-fn draw_agents(f: &mut Frame, choices: &[String], sel: usize) {
+fn draw_choices(f: &mut Frame, title: &str, choices: &[String], sel: usize) {
     let height = choices.len() as u16 + 2;
+    let width = choices.iter().map(|c| c.chars().count()).chain([title.chars().count()]).max().unwrap_or(0) as u16 + 4;
     let full = f.area();
     let area = Rect {
-        x: full.width.saturating_sub(30) / 2,
+        x: full.width.saturating_sub(width) / 2,
         y: full.height.saturating_sub(height) / 2,
-        width: 30.min(full.width),
+        width: width.min(full.width),
         height: height.min(full.height),
     };
     let items: Vec<ListItem> = choices.iter().map(|c| ListItem::new(format!(" {c}"))).collect();
-    let list = List::new(items).block(panel(" Start with which agent? ", true)).highlight_style(highlight());
+    let list = List::new(items).block(panel(title, true)).highlight_style(highlight());
     f.render_widget(Clear, area);
     f.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(sel)));
 }

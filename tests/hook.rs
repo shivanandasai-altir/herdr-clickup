@@ -85,3 +85,16 @@ fn garbage_does_nothing() {
     assert_eq!(decide(&json!(null), &state(false)), Decision::Nothing);
     assert_eq!(decide(&json!({ "event": "pane.closed" }), &state(false)), Decision::Nothing);
 }
+
+#[test]
+fn removing_a_worktree_forgets_its_workspaces_links() {
+    let ev = json!({ "event": "worktree.removed", "data": { "workspace_id": "w3", "forced": true, "worktree": {} } });
+    assert_eq!(decide(&ev, &state(false)), Decision::ForgetWorkspace { workspace_id: "w3".into() });
+}
+
+#[test]
+fn removing_an_unlinked_worktree_does_nothing() {
+    // w30 must not match the w3:… panes.
+    let ev = json!({ "event": "worktree.removed", "data": { "workspace_id": "w30" } });
+    assert_eq!(decide(&ev, &state(false)), Decision::Nothing);
+}
