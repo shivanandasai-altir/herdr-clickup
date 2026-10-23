@@ -115,3 +115,7 @@ openspec list                 # changes in flight
 openspec validate --all       # every change and spec
 openspec archive <change>     # after merge: apply the deltas to openspec/specs
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
