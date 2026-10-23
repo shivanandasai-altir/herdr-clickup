@@ -8,7 +8,7 @@ use herdr_clickup::{
     herdr,
     hook::{Decision, Phase, decide, proposed_update},
     link::task_id_from_url,
-    store,
+    report, store,
     task::Task,
 };
 use std::{env, io::BufRead};
@@ -198,6 +198,17 @@ fn hook() -> Result<()> {
         .unwrap_or(serde_json::Value::Null);
     // Only status names are needed here, and only to draft the proposal.
     let cfg = Config::load().ok();
+    // The work summary reads git and files, so build it outside the state lock.
+    let summary = if matches!(decide(&event, &store::read()), Decision::Report { .. }) {
+        event
+            .pointer("/data/pane_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|pane| store::read().panes.get(pane).cloned())
+            .map(|link| report::work_summary(&link))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     // Decide and claim under the lock, so two hooks for the same finish cannot both draft it.
     let decision = store::update(|state| {
         let d = decide(&event, state);
@@ -221,6 +232,7 @@ fn hook() -> Result<()> {
                     *phase,
                     cfg.as_ref().and_then(|c| c.status_done.as_deref()),
                     cfg.as_ref().and_then(|c| c.status_spec.as_deref()),
+                    &summary,
                 );
                 if let Some(l) = state.panes.get_mut(pane_id) {
                     l.reported = true;

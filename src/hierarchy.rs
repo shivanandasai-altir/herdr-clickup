@@ -17,14 +17,21 @@ pub struct ListRef {
 pub fn parse_space_lists(space: &str, folders: &Value, folderless: &Value) -> Vec<ListRef> {
     let in_folders = arr(folders, "folders").iter().flat_map(|f| {
         let folder = f.get("name").and_then(Value::as_str).map(str::to_string);
-        arr(f, "lists").iter().filter_map(move |l| list(space, folder.clone(), l))
+        arr(f, "lists")
+            .iter()
+            .filter_map(move |l| list(space, folder.clone(), l))
     });
-    let loose = arr(folderless, "lists").iter().filter_map(|l| list(space, None, l));
+    let loose = arr(folderless, "lists")
+        .iter()
+        .filter_map(|l| list(space, None, l));
     in_folders.chain(loose).collect()
 }
 
 fn arr<'a>(v: &'a Value, key: &str) -> &'a [Value] {
-    v.get(key).and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default()
+    v.get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
 }
 
 /// ClickUp sends numbers as strings in some fields and as numbers in others.

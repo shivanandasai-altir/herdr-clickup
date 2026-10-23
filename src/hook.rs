@@ -143,8 +143,9 @@ pub fn proposed_update(
     phase: Phase,
     status_done: Option<&str>,
     status_spec: Option<&str>,
+    summary: &str,
 ) -> Update {
-    match (change, phase) {
+    let head = match (change, phase) {
         (Some(c), Phase::SpecDrafting | Phase::SpecDrafted) => Update {
             comment: format!(
                 "Spec drafted: OpenSpec change `{c}` on branch `{branch}` is ready for review."
@@ -161,6 +162,17 @@ pub fn proposed_update(
             comment: format!("herdr agent finished its turn on branch `{branch}`."),
             status: status_done.map(str::to_string),
         },
+    };
+    Update {
+        comment: with_summary(head.comment, summary),
+        status: head.status,
+    }
+}
+
+fn with_summary(head: String, summary: &str) -> String {
+    match summary.trim() {
+        "" => head,
+        s => format!("{head}\n\n{s}"),
     }
 }
 

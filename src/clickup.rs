@@ -1,8 +1,8 @@
-use crate::hierarchy::{parse_space_lists, ListRef};
-use crate::task::{parse_task, parse_task_list, Task};
-use crate::ticket::{parse_ticket, Ticket};
-use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Value};
+use crate::hierarchy::{ListRef, parse_space_lists};
+use crate::task::{Task, parse_task, parse_task_list};
+use crate::ticket::{Ticket, parse_ticket};
+use anyhow::{Context, Result, anyhow};
+use serde_json::{Value, json};
 
 const API: &str = "https://api.clickup.com/api/v2";
 
@@ -66,7 +66,8 @@ impl ClickUp {
         for page in 0..MAX_PAGES {
             let v = self.get(&format!("{path}&page={page}"))?;
             let got = parse_task_list(&v);
-            let last = got.is_empty() || v.get("last_page").and_then(Value::as_bool).unwrap_or(true);
+            let last =
+                got.is_empty() || v.get("last_page").and_then(Value::as_bool).unwrap_or(true);
             tasks.extend(got);
             if last {
                 break;
@@ -79,22 +80,35 @@ impl ClickUp {
     pub fn my_tasks(&self, spaces: &[String]) -> Result<Vec<Task>> {
         let (team, me) = (self.team_id()?, self.my_user_id()?);
         let only: String = spaces.iter().map(|s| format!("&space_ids[]={s}")).collect();
-        self.all_tasks(&format!("/team/{team}/task?assignees[]={me}&subtasks=true&order_by=updated{only}"))
+        self.all_tasks(&format!(
+            "/team/{team}/task?assignees[]={me}&subtasks=true&order_by=updated{only}"
+        ))
     }
 
     /// Open tasks in one list, subtasks and tasks added from other lists (as sprints do) included.
     pub fn list_tasks(&self, list_id: &str) -> Result<Vec<Task>> {
-        self.all_tasks(&format!("/list/{list_id}/task?subtasks=true&include_timl=true&order_by=updated"))
+        self.all_tasks(&format!(
+            "/list/{list_id}/task?subtasks=true&include_timl=true&order_by=updated"
+        ))
     }
 
     /// `(id, name)` of the workspace's spaces, limited to `only` when it is not empty.
     pub fn spaces(&self, only: &[String]) -> Result<Vec<(String, String)>> {
         let team = self.team_id()?;
         let v = self.get(&format!("/team/{team}/space?archived=false"))?;
-        let spaces = v.get("spaces").and_then(Value::as_array).cloned().unwrap_or_default();
+        let spaces = v
+            .get("spaces")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         Ok(spaces
             .iter()
-            .filter_map(|s| Some((s.get("id")?.as_str()?.to_string(), s.get("name")?.as_str()?.to_string())))
+            .filter_map(|s| {
+                Some((
+                    s.get("id")?.as_str()?.to_string(),
+                    s.get("name")?.as_str()?.to_string(),
+                ))
+            })
             .filter(|(id, _)| only.is_empty() || only.contains(id))
             .collect())
     }
@@ -122,6 +136,10 @@ impl ClickUp {
     }
 
     pub fn comment(&self, id: &str, text: &str) -> Result<()> {
-        self.send("POST", &format!("/task/{id}/comment"), json!({ "comment_text": text, "notify_all": false }))
+        self.send(
+            "POST",
+            &format!("/task/{id}/comment"),
+            json!({ "comment_text": text, "notify_all": false }),
+        )
     }
 }

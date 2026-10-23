@@ -1,7 +1,29 @@
 /// `herdr agent start --kind` values in herdr 0.9.5; each is also the agent's executable name.
 pub const KINDS: &[&str] = &[
-    "pi", "claude", "codex", "gemini", "cursor", "devin", "agy", "cline", "omp", "mastracode", "opencode", "copilot",
-    "kimi", "kiro", "droid", "amp", "grok", "hermes", "kilo", "qodercli", "qwen", "letta", "maki", "muse",
+    "pi",
+    "claude",
+    "codex",
+    "gemini",
+    "cursor",
+    "devin",
+    "agy",
+    "cline",
+    "omp",
+    "mastracode",
+    "opencode",
+    "copilot",
+    "kimi",
+    "kiro",
+    "droid",
+    "amp",
+    "grok",
+    "hermes",
+    "kilo",
+    "qodercli",
+    "qwen",
+    "letta",
+    "maki",
+    "muse",
 ];
 
 const FIRST: [&str; 3] = ["claude", "codex", "pi"];
@@ -29,10 +51,21 @@ pub fn is_installed(kind: &str) -> bool {
 pub fn find_executable(name: &str) -> Option<std::path::PathBuf> {
     use std::{env, path::PathBuf};
     let home = env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    let extra = [".local/bin", ".cargo/bin", ".bun/bin", ".npm-global/bin", ".volta/bin"].map(|d| home.join(d));
+    let extra = [
+        ".local/bin",
+        ".cargo/bin",
+        ".bun/bin",
+        ".npm-global/bin",
+        ".volta/bin",
+    ]
+    .map(|d| home.join(d));
     let system = ["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from);
     let path = env::var_os("PATH").unwrap_or_default();
-    env::split_paths(&path).chain(extra).chain(system).map(|d| d.join(name)).find(|p| is_executable(p))
+    env::split_paths(&path)
+        .chain(extra)
+        .chain(system)
+        .map(|d| d.join(name))
+        .find(|p| is_executable(p))
 }
 
 fn is_executable(p: &std::path::Path) -> bool {

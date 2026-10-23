@@ -8,6 +8,7 @@ pub mod hierarchy;
 pub mod hook;
 pub mod link;
 pub mod openspec;
+pub mod report;
 pub mod repos;
 pub mod store;
 pub mod task;

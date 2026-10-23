@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::{collections::HashMap, env, fs, path::PathBuf};
 
 /// Settings from `$HERDR_PLUGIN_CONFIG_DIR/.env`; real environment variables win.
@@ -35,22 +35,35 @@ fn read_env_file() -> HashMap<String, String> {
 impl Config {
     pub fn load() -> Result<Config> {
         let file = read_env_file();
-        let get = |k: &str| env::var(k).ok().or_else(|| file.get(k).cloned()).filter(|v| !v.is_empty());
+        let get = |k: &str| {
+            env::var(k)
+                .ok()
+                .or_else(|| file.get(k).cloned())
+                .filter(|v| !v.is_empty())
+        };
         let Some(token) = get("CLICKUP_TOKEN") else {
-            let dir = config_dir().map(|d| d.display().to_string()).unwrap_or("the plugin config dir".into());
+            let dir = config_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or("the plugin config dir".into());
             bail!("CLICKUP_TOKEN is not set; add it to {dir}/.env");
         };
         // An explicit empty value turns a status change off.
-        let status = |k: &str, default: &str| match env::var(k).ok().or_else(|| file.get(k).cloned()) {
-            Some(v) if v.is_empty() => None,
-            Some(v) => Some(v),
-            None => Some(default.to_string()),
-        };
+        let status =
+            |k: &str, default: &str| match env::var(k).ok().or_else(|| file.get(k).cloned()) {
+                Some(v) if v.is_empty() => None,
+                Some(v) => Some(v),
+                None => Some(default.to_string()),
+            };
         Ok(Config {
             token,
             team_id: get("CLICKUP_TEAM_ID"),
             space_ids: get("CLICKUP_SPACE_IDS")
-                .map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
                 .unwrap_or_default(),
             agent: get("CLICKUP_AGENT"),
             status_started: status("CLICKUP_STATUS_STARTED", "in progress"),

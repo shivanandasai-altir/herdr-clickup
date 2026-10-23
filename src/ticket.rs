@@ -48,7 +48,11 @@ fn custom_field(f: &Value) -> Option<(String, String)> {
         "users" | "attachment" | "files" | "relationship" => return None,
         _ => {}
     }
-    let options = f.pointer("/type_config/options").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let options = f
+        .pointer("/type_config/options")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let option = |id: &str| {
         options
             .iter()

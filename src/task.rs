@@ -18,7 +18,10 @@ pub struct Assignee {
 }
 
 fn text(v: &Value, key: &str) -> String {
-    v.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
+    v.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// One task object, as returned by `GET /task/{id}` or inside a task list.
@@ -36,7 +39,11 @@ pub fn parse_task(v: &Value) -> Option<Task> {
     Some(Task {
         id,
         name,
-        status: v.pointer("/status/status").and_then(Value::as_str).unwrap_or_default().to_string(),
+        status: v
+            .pointer("/status/status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         url: text(v, "url"),
         description,
         assignees: v
@@ -44,7 +51,12 @@ pub fn parse_task(v: &Value) -> Option<Task> {
             .and_then(Value::as_array)
             .map(|a| {
                 a.iter()
-                    .filter_map(|u| Some(Assignee { id: u.get("id")?.as_u64()?, username: text(u, "username") }))
+                    .filter_map(|u| {
+                        Some(Assignee {
+                            id: u.get("id")?.as_u64()?,
+                            username: text(u, "username"),
+                        })
+                    })
                     .collect()
             })
             .unwrap_or_default(),
@@ -71,7 +83,11 @@ pub fn branch_name(t: &Task) -> String {
         .collect();
     let mut slug = String::new();
     for w in words {
-        let extra = if slug.is_empty() { w.len() } else { w.len() + 1 };
+        let extra = if slug.is_empty() {
+            w.len()
+        } else {
+            w.len() + 1
+        };
         if slug.len() + extra > SLUG_MAX {
             break;
         }
@@ -80,7 +96,11 @@ pub fn branch_name(t: &Task) -> String {
         }
         slug.push_str(&w);
     }
-    if slug.is_empty() { format!("CU-{}", t.id) } else { format!("CU-{}-{}", t.id, slug) }
+    if slug.is_empty() {
+        format!("CU-{}", t.id)
+    } else {
+        format!("CU-{}-{}", t.id, slug)
+    }
 }
 
 /// The first prompt the agent gets in the task's worktree.
@@ -94,7 +114,11 @@ pub fn agent_prompt(t: &Task) -> String {
 
 /// `cu-<id>`, fitted to herdr's agent name rule `[a-z][a-z0-9_-]{0,31}`.
 pub fn agent_name(t: &Task) -> String {
-    let id: String = t.id.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    let id: String =
+        t.id.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
     format!("cu-{id}").chars().take(32).collect()
 }
 
@@ -132,7 +156,10 @@ pub fn assignees_in(tasks: &[Task]) -> Vec<(Assignee, usize)> {
             None => out.push((a.clone(), 1)),
         }
     }
-    out.sort_by(|(a, n), (b, m)| m.cmp(n).then_with(|| a.username.to_lowercase().cmp(&b.username.to_lowercase())));
+    out.sort_by(|(a, n), (b, m)| {
+        m.cmp(n)
+            .then_with(|| a.username.to_lowercase().cmp(&b.username.to_lowercase()))
+    });
     out
 }
 

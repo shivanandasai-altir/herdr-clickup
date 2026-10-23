@@ -183,7 +183,8 @@ fn a_finished_spec_start_proposes_a_spec_drafted_update() {
             Some("cu-86a-x"),
             Phase::SpecDrafting,
             Some("review"),
-            None
+            None,
+            ""
         ),
         Update {
             comment:
@@ -202,7 +203,8 @@ fn a_finished_code_start_proposes_finished_and_the_done_status() {
             None,
             Phase::Implementing,
             Some("review"),
-            Some("spec review")
+            Some("spec review"),
+            ""
         ),
         Update {
             comment: "herdr agent finished its turn on branch `CU-86a-x`.".into(),
@@ -231,7 +233,7 @@ fn a_link_written_before_phases_existed_reads_its_phase_from_the_change() {
 #[test]
 fn a_finished_implementation_proposes_the_done_status() {
     assert_eq!(
-        proposed_update("CU-86a-x", Some("cu-86a-x"), Phase::Implementing, Some("review"), Some("spec review")),
+        proposed_update("CU-86a-x", Some("cu-86a-x"), Phase::Implementing, Some("review"), Some("spec review"), ""),
         Update {
             comment: "Implementation done: OpenSpec change `cu-86a-x` on branch `CU-86a-x` is ready for review.".into(),
             status: Some("review".into()),
@@ -386,4 +388,26 @@ fn a_start_drafts_a_status_only_update() {
         })
     );
     assert_eq!(start_update(None), None);
+}
+
+#[test]
+fn a_draft_appends_the_work_summary() {
+    let u = proposed_update(
+        "CU-1",
+        None,
+        Phase::Implementing,
+        Some("review"),
+        None,
+        "2 commits:\n- abc fix",
+    );
+    assert!(
+        u.comment.ends_with("2 commits:\n- abc fix"),
+        "{}",
+        u.comment
+    );
+    assert!(
+        u.comment.starts_with("herdr agent finished"),
+        "{}",
+        u.comment
+    );
 }
