@@ -6,7 +6,8 @@ min_herdr_version = "0.9.3"
 description = "Pick your ClickUp tasks, start an agent on one in its own worktree, and report back when it is done."
 platforms = ["macos", "linux"]
 
-# Commands go through bin/run.sh, which runs the binary built by `cargo build --release`.
+# Commands go through bin/run.sh. bin/build.sh downloads this version's release binary for the
+# platform, and builds from source only when there is no asset.
 [[build]]
 command = ["sh", "bin/build.sh"]
 

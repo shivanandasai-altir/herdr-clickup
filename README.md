@@ -38,11 +38,16 @@ A [herdr](https://herdr.dev) plugin for ClickUp:
 
 ## Install
 
-Needs `cargo`.
-
 ```sh
 herdr plugin install ssk090/herdr-clickup
-# or, from a checkout:
+```
+
+The install downloads the release binary for macOS (arm64, x86_64) or Linux (x86_64, arm64). If the
+release has no asset for this machine, it builds from source, which needs `cargo`.
+
+From a checkout, build it yourself:
+
+```sh
 cargo build --release && herdr plugin link .
 ```
 
