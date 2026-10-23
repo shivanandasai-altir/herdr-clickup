@@ -9,6 +9,9 @@ use crate::{
     task::{agent_name, agent_prompt, branch_name, Task},
 };
 use anyhow::{bail, Result};
+use std::process::Command;
+
+pub const NO_AGENT: &str = "no supported coding agent is installed";
 
 pub fn client() -> Result<(Config, ClickUp)> {
     let cfg = Config::load()?;
@@ -26,7 +29,7 @@ pub fn agent_options(cfg: &Config) -> Vec<String> {
 /// Returns a one-line summary; prints nothing, so a TUI can call it.
 pub fn start(cfg: &Config, cu: &ClickUp, task: &Task, agent: &str) -> Result<String> {
     if agent.is_empty() {
-        bail!("no agent chosen");
+        bail!(NO_AGENT);
     }
     store::remember_agent(agent);
     let branch = branch_name(task);
@@ -43,6 +46,13 @@ pub fn start(cfg: &Config, cu: &ClickUp, task: &Task, agent: &str) -> Result<Str
     }
     herdr::notify("ClickUp task started", &format!("{} → {agent} in {}", task.name, wt.workspace_id));
     Ok(summary)
+}
+
+/// Opens `url` in the default browser without waiting for it.
+pub fn open_url(url: &str) -> Result<()> {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    Command::new(opener).arg(url).spawn()?;
+    Ok(())
 }
 
 /// Status names differ per ClickUp space, so a missing one is a warning, not a failure.

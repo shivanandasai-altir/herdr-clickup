@@ -74,10 +74,11 @@ impl ClickUp {
         Ok(tasks)
     }
 
-    /// Open tasks assigned to the token's user, most recently updated first.
-    pub fn my_tasks(&self) -> Result<Vec<Task>> {
+    /// Open tasks assigned to the token's user in the `spaces` given (all when empty), most recently updated first.
+    pub fn my_tasks(&self, spaces: &[String]) -> Result<Vec<Task>> {
         let (team, me) = (self.team_id()?, self.my_user_id()?);
-        self.all_tasks(&format!("/team/{team}/task?assignees[]={me}&subtasks=true&order_by=updated"))
+        let only: String = spaces.iter().map(|s| format!("&space_ids[]={s}")).collect();
+        self.all_tasks(&format!("/team/{team}/task?assignees[]={me}&subtasks=true&order_by=updated{only}"))
     }
 
     /// Open tasks in one list, subtasks and tasks added from other lists (as sprints do) included.

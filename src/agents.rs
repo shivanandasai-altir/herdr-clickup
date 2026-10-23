@@ -27,5 +27,10 @@ pub fn is_installed(kind: &str) -> bool {
     let extra = [".local/bin", ".cargo/bin", ".bun/bin", ".npm-global/bin", ".volta/bin"].map(|d| home.join(d));
     let system = ["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from);
     let path = env::var_os("PATH").unwrap_or_default();
-    env::split_paths(&path).chain(extra).chain(system).any(|d| d.join(kind).is_file())
+    env::split_paths(&path).chain(extra).chain(system).any(|d| is_executable(&d.join(kind)))
+}
+
+fn is_executable(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }

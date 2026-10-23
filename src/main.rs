@@ -1,7 +1,7 @@
 use anyhow::{anyhow, bail, Result};
 use dialoguer::{FuzzySelect, Select};
 use herdr_clickup::{
-    app::{self, agent_options, client, set_status},
+    app::{self, agent_options, client, open_url, set_status, NO_AGENT},
     board,
     clickup::ClickUp,
     config::Config,
@@ -11,7 +11,7 @@ use herdr_clickup::{
     store,
     task::Task,
 };
-use std::{env, io::BufRead, process::Command};
+use std::{env, io::BufRead};
 
 const USAGE: &str = "usage: herdr-clickup <board|tasks|link|picker|task|list|start <id> [agent]|hook>";
 
@@ -52,8 +52,8 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
         }
         // Plumbing.
         "list" => {
-            let (_, cu) = client()?;
-            for t in cu.my_tasks()? {
+            let (cfg, cu) = client()?;
+            for t in cu.my_tasks(&cfg.space_ids)? {
                 println!("{}\t[{}]\t{}", t.id, t.status, t.name);
             }
             Ok(())
@@ -63,7 +63,7 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
             let (cfg, cu) = client()?;
             let agent = match rest.get(1) {
                 Some(a) => a.clone(),
-                None => agent_options(&cfg).into_iter().next().ok_or_else(|| anyhow!("no supported agent installed"))?,
+                None => agent_options(&cfg).into_iter().next().ok_or_else(|| anyhow!(NO_AGENT))?,
             };
             println!("{}", app::start(&cfg, &cu, &cu.task(id)?, &agent)?);
             Ok(())
@@ -76,7 +76,7 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
 fn picker() -> Result<()> {
     let (cfg, cu) = client()?;
     println!("Loading your ClickUp tasks…");
-    let tasks = cu.my_tasks()?;
+    let tasks = cu.my_tasks(&cfg.space_ids)?;
     if tasks.is_empty() {
         bail!("no open tasks are assigned to you");
     }
@@ -93,7 +93,7 @@ fn task_menu(cfg: &Config, cu: &ClickUp, task: &Task) -> Result<()> {
         Some(0) => {
             let agents = agent_options(cfg);
             if agents.is_empty() {
-                bail!("no supported coding agent is installed");
+                bail!(NO_AGENT);
             }
             let Some(a) = Select::new().with_prompt("Agent").items(&agents).default(0).interact_opt()? else {
                 return Ok(());
@@ -129,11 +129,5 @@ fn hook() -> Result<()> {
         }
         herdr::notify("ClickUp task updated", &format!("{task_id}: agent done on {branch}"));
     }
-    Ok(())
-}
-
-fn open_url(url: &str) -> Result<()> {
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    Command::new(opener).arg(url).status()?;
     Ok(())
 }

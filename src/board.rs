@@ -1,7 +1,7 @@
 //! The ClickUp board: a herdr tab with sprints and lists on the left and their tasks on the right.
 //! ClickUp calls run on background threads and report back over a channel, so the UI never blocks.
 use crate::{
-    app,
+    app::{self, NO_AGENT},
     clickup::ClickUp,
     config::Config,
     hierarchy::{current_sprints, ListRef},
@@ -18,7 +18,6 @@ use ratatui::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    process::Command,
     sync::mpsc::{channel, Receiver, Sender},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -50,13 +49,13 @@ impl Source {
     }
 }
 
-/// Spaces as `(id, name)`, all their lists, and the token user's id.
-type Hierarchy = (Vec<(String, String)>, Vec<ListRef>, Option<u64>);
+/// Spaces as `(id, name)`, all their lists, the token user's id, and how many spaces failed to load.
+type Hierarchy = (Vec<(String, String)>, Vec<ListRef>, Option<u64>, usize);
 
 enum Msg {
     Hierarchy(Result<Hierarchy>),
     Tasks(String, Result<Vec<Task>>),
-    Started(Result<String>),
+    Started(String, Result<String>),
 }
 
 #[derive(Clone)]
@@ -77,7 +76,8 @@ struct SideRow {
 enum Modal {
     None,
     Detail,
-    Agent { choices: Vec<String>, sel: usize },
+    /// Holds the task itself: the table can reload while the modal is open.
+    Agent { task: Task, choices: Vec<String>, sel: usize },
 }
 
 #[derive(PartialEq)]
@@ -107,6 +107,8 @@ struct Board {
     mine_only: bool,
     modal: Modal,
     status: String,
+    /// Tasks being started, so a second `s` cannot start a second worktree.
+    starting: HashSet<String>,
     quit: bool,
 }
 
@@ -117,6 +119,8 @@ pub fn run() -> Result<()> {
     ratatui::restore();
     result
 }
+
+const REFRESHING: &str = "refreshing…";
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
@@ -154,6 +158,7 @@ impl Board {
             mine_only: false,
             modal: Modal::None,
             status: String::new(),
+            starting: HashSet::new(),
             quit: false,
         };
         b.load_hierarchy();
@@ -180,18 +185,24 @@ impl Board {
     // ---- loading ----
 
     fn load_hierarchy(&mut self) {
+        if self.loading_hierarchy {
+            return;
+        }
         self.loading_hierarchy = true;
         let (cu, only, tx) = (self.cu.clone(), self.cfg.space_ids.clone(), self.tx.clone());
         thread::spawn(move || {
             let result = (|| {
                 let spaces = cu.spaces(&only)?;
                 // One space's folders and lists per thread: a workspace can have dozens of spaces.
-                let lists = thread::scope(|s| {
+                let results: Vec<Result<Vec<ListRef>>> = thread::scope(|s| {
                     let jobs: Vec<_> =
                         spaces.iter().map(|(id, name)| s.spawn(|| cu.space_lists(id, name))).collect();
-                    jobs.into_iter().map(|j| j.join().expect("space thread panicked")).collect::<Result<Vec<_>>>()
-                })?;
-                Ok((spaces, lists.concat(), cu.my_user_id().ok()))
+                    jobs.into_iter().map(|j| j.join().expect("space thread panicked")).collect()
+                });
+                // One unreadable space should not hide the others.
+                let failed = results.iter().filter(|r| r.is_err()).count();
+                let lists = results.into_iter().flatten().flatten().collect();
+                Ok((spaces, lists, cu.my_user_id().ok(), failed))
             })();
             let _ = tx.send(Msg::Hierarchy(result));
         });
@@ -202,10 +213,10 @@ impl Board {
         if !self.loading_tasks.insert(key.clone()) {
             return;
         }
-        let (cu, tx) = (self.cu.clone(), self.tx.clone());
+        let (cu, tx, spaces) = (self.cu.clone(), self.tx.clone(), self.cfg.space_ids.clone());
         thread::spawn(move || {
             let result = match &source {
-                Source::Mine => cu.my_tasks(),
+                Source::Mine => cu.my_tasks(&spaces),
                 Source::List(l) => cu.list_tasks(&l.id),
             };
             let _ = tx.send(Msg::Tasks(key, result));
@@ -214,8 +225,12 @@ impl Board {
 
     fn receive(&mut self, msg: Msg) {
         match msg {
-            Msg::Hierarchy(Ok((spaces, lists, me))) => {
+            Msg::Hierarchy(Ok((spaces, lists, me, failed))) => {
                 self.loading_hierarchy = false;
+                self.done_refreshing();
+                if failed > 0 {
+                    self.status = format!("{failed} space(s) could not be loaded; press r to retry");
+                }
                 // With a single space there is nothing to choose: open it.
                 if let [(_, name)] = spaces.as_slice() {
                     self.expanded.insert(space_key(name));
@@ -231,12 +246,26 @@ impl Board {
             Msg::Tasks(key, result) => {
                 self.loading_tasks.remove(&key);
                 match result {
-                    Ok(tasks) => drop(self.tasks.insert(key, tasks)),
+                    Ok(tasks) => {
+                        self.tasks.insert(key, tasks);
+                        self.done_refreshing();
+                    }
                     Err(e) => self.status = format!("could not load tasks: {e:#}"),
                 }
             }
-            Msg::Started(Ok(summary)) => self.status = summary,
-            Msg::Started(Err(e)) => self.status = format!("start failed: {e:#}"),
+            Msg::Started(task_id, result) => {
+                self.starting.remove(&task_id);
+                self.status = match result {
+                    Ok(summary) => summary,
+                    Err(e) => format!("start failed: {e:#}"),
+                };
+            }
+        }
+    }
+
+    fn done_refreshing(&mut self) {
+        if self.status == REFRESHING && !self.loading_hierarchy && self.loading_tasks.is_empty() {
+            self.status.clear();
         }
     }
 
@@ -306,15 +335,15 @@ impl Board {
             return;
         }
         match std::mem::replace(&mut self.modal, Modal::None) {
-            Modal::Agent { choices, mut sel } => {
+            Modal::Agent { task, choices, mut sel } => {
                 match k.code {
                     KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
                     KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(choices.len().saturating_sub(1)),
-                    KeyCode::Enter => return self.start(&choices[sel]),
+                    KeyCode::Enter => return self.start(task, &choices[sel]),
                     KeyCode::Esc | KeyCode::Char('q') => return,
                     _ => {}
                 }
-                self.modal = Modal::Agent { choices, sel };
+                self.modal = Modal::Agent { task, choices, sel };
                 return;
             }
             Modal::Detail => {
@@ -334,21 +363,25 @@ impl Board {
             KeyCode::Esc => {
                 self.filter.clear();
                 self.status.clear();
+                self.table.select(Some(0));
             }
             KeyCode::Tab => self.focus = if self.focus == Focus::Side { Focus::Tasks } else { Focus::Side },
             KeyCode::Char('/') => {
                 self.filtering = true;
                 self.focus = Focus::Tasks;
             }
+            KeyCode::Char('m') if self.me.is_none() => {
+                self.status = "your ClickUp user is not loaded yet; try again in a moment (r reloads)".into();
+            }
             KeyCode::Char('m') => {
                 self.mine_only = !self.mine_only;
                 self.table.select(Some(0));
             }
+            // The old tasks stay on screen until the new ones arrive, so a failed reload loses nothing.
             KeyCode::Char('r') => {
-                self.tasks.remove(&self.source.key());
+                self.status = REFRESHING.into();
                 self.load_tasks(self.source.clone());
                 self.load_hierarchy();
-                self.status = "refreshing…".into();
             }
             _ if self.focus == Focus::Side => self.side_key(k.code),
             _ => self.task_key(k.code),
@@ -401,27 +434,36 @@ impl Board {
     }
 
     fn choose_agent(&mut self) {
+        let Some(task) = self.selected_task() else { return };
+        if self.starting.contains(&task.id) {
+            self.status = format!("{} is already starting", task.name);
+            return;
+        }
         let choices = app::agent_options(&self.cfg);
         if choices.is_empty() {
-            self.status = "no supported coding agent is installed".into();
+            self.status = NO_AGENT.into();
         } else {
-            self.modal = Modal::Agent { choices, sel: 0 };
+            self.modal = Modal::Agent { task, choices, sel: 0 };
         }
     }
 
-    fn start(&mut self, agent: &str) {
-        let Some(task) = self.selected_task() else { return };
+    fn start(&mut self, task: Task, agent: &str) {
+        if !self.starting.insert(task.id.clone()) {
+            return;
+        }
         self.status = format!("starting {agent} on {}…", task.name);
         let (cfg, cu, tx, agent) = (self.cfg.clone(), self.cu.clone(), self.tx.clone(), agent.to_string());
         thread::spawn(move || {
-            let _ = tx.send(Msg::Started(app::start(&cfg, &cu, &task, &agent)));
+            let result = app::start(&cfg, &cu, &task, &agent);
+            let _ = tx.send(Msg::Started(task.id, result));
         });
     }
 
     fn open_in_browser(&mut self) {
-        if let Some(t) = self.selected_task() {
-            let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-            let _ = Command::new(opener).arg(&t.url).spawn();
+        if let Some(t) = self.selected_task()
+            && let Err(e) = app::open_url(&t.url)
+        {
+            self.status = format!("could not open the browser: {e:#}");
         }
     }
 
@@ -436,7 +478,7 @@ impl Board {
         match &self.modal {
             Modal::None => {}
             Modal::Detail => self.draw_detail(f),
-            Modal::Agent { choices, sel } => draw_agents(f, choices, *sel),
+            Modal::Agent { choices, sel, .. } => draw_agents(f, choices, *sel),
         }
     }
 
