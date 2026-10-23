@@ -19,3 +19,14 @@ pub fn update<T>(change: impl FnOnce(&mut State) -> T) -> Result<T> {
     fs::rename(tmp, path)?;
     Ok(out)
 }
+
+/// The agent kind picked last time, offered first next time.
+pub fn last_agent() -> Option<String> {
+    fs::read_to_string(dir().ok()?.join("agent")).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+pub fn remember_agent(kind: &str) {
+    if let Ok(d) = dir() {
+        let _ = fs::write(d.join("agent"), kind);
+    }
+}

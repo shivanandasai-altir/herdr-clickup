@@ -1,4 +1,4 @@
-use herdr_clickup::task::{parse_task, parse_task_list, Task};
+use herdr_clickup::task::{parse_task, parse_task_list, Assignee, Task};
 use serde_json::json;
 
 fn sample() -> serde_json::Value {
@@ -11,7 +11,7 @@ fn sample() -> serde_json::Value {
         "description": "After login we land on /404.\nShould go to /home.",
         "status": { "status": "to do", "color": "#d3d3d3", "type": "open" },
         "url": "https://app.clickup.com/t/86c1abcd",
-        "assignees": [{ "id": 61481949 }]
+        "assignees": [{ "id": 61481949, "username": "Shivananda Sai" }, { "id": 7, "username": null }]
     })
 }
 
@@ -25,6 +25,10 @@ fn parses_a_single_task() {
             status: "to do".into(),
             url: "https://app.clickup.com/t/86c1abcd".into(),
             description: "After login we land on /404.\nShould go to /home.".into(),
+            assignees: vec![
+                Assignee { id: 61481949, username: "Shivananda Sai".into() },
+                Assignee { id: 7, username: String::new() },
+            ],
         })
     );
 }
@@ -58,6 +62,7 @@ fn task(id: &str, name: &str, description: &str) -> Task {
         status: "to do".into(),
         url: format!("https://app.clickup.com/t/{id}"),
         description: description.into(),
+        assignees: Vec::new(),
     }
 }
 
@@ -119,5 +124,43 @@ mod agent {
     fn drops_characters_herdr_rejects_and_caps_at_32() {
         assert_eq!(agent_name(&task("ABC.123/x", "", "")), "cu-abc123x");
         assert_eq!(agent_name(&task(&"a".repeat(40), "", "")).len(), 32);
+    }
+}
+
+mod filter {
+    use super::task;
+    use herdr_clickup::task::{filter_tasks, Assignee, Task};
+
+    fn tasks() -> Vec<Task> {
+        let mut a = task("86a", "Add VAT number to invoice", "");
+        a.assignees = vec![Assignee { id: 1, username: "me".into() }];
+        let mut b = task("86b", "Invoice grid: payment filter", "");
+        b.assignees = vec![Assignee { id: 2, username: "jd".into() }];
+        let c = task("86c", "Fix login redirect", "");
+        vec![a, b, c]
+    }
+
+    fn ids(v: Vec<&Task>) -> Vec<&str> {
+        v.into_iter().map(|t| t.id.as_str()).collect()
+    }
+
+    #[test]
+    fn empty_query_keeps_everything() {
+        assert_eq!(ids(filter_tasks(&tasks(), "  ", None)), ["86a", "86b", "86c"]);
+    }
+
+    #[test]
+    fn every_word_must_match_name_or_id_case_insensitively() {
+        let t = tasks();
+        assert_eq!(ids(filter_tasks(&t, "INVOICE", None)), ["86a", "86b"]);
+        assert_eq!(ids(filter_tasks(&t, "invoice vat", None)), ["86a"]);
+        assert_eq!(ids(filter_tasks(&t, "86c", None)), ["86c"]);
+    }
+
+    #[test]
+    fn mine_keeps_tasks_assigned_to_that_user() {
+        let t = tasks();
+        assert_eq!(ids(filter_tasks(&t, "", Some(1))), ["86a"]);
+        assert_eq!(ids(filter_tasks(&t, "login", Some(1))), Vec::<&str>::new());
     }
 }

@@ -11,6 +11,11 @@ platforms = ["macos", "linux"]
 command = ["sh", "bin/build.sh"]
 
 [[actions]]
+id = "board"
+title = "ClickUp: board (sprints & lists)"
+command = ["sh", "bin/run.sh", "board"]
+
+[[actions]]
 id = "tasks"
 title = "ClickUp: my tasks"
 command = ["sh", "bin/run.sh", "tasks"]
@@ -33,6 +38,12 @@ command = ["sh", "bin/run.sh", "hook"]
 [[events]]
 on = "pane.closed"
 command = ["sh", "bin/run.sh", "hook"]
+
+[[panes]]
+id = "board"
+title = "ClickUp"
+placement = "tab"
+command = ["sh", "bin/run.sh", "board-pane"]
 
 [[panes]]
 id = "picker"

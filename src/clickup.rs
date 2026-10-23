@@ -1,3 +1,4 @@
+use crate::hierarchy::{parse_space_lists, ListRef};
 use crate::task::{parse_task, parse_task_list, Task};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
@@ -5,6 +6,7 @@ use serde_json::{json, Value};
 const API: &str = "https://api.clickup.com/api/v2";
 
 /// Thin blocking client for the ClickUp v2 REST API.
+#[derive(Clone)]
 pub struct ClickUp {
     token: String,
     team_id: Option<String>,
@@ -37,7 +39,7 @@ impl ClickUp {
         Ok(())
     }
 
-    fn team_id(&self) -> Result<String> {
+    pub fn team_id(&self) -> Result<String> {
         if let Some(t) = &self.team_id {
             return Ok(t.clone());
         }
@@ -49,18 +51,57 @@ impl ClickUp {
             .ok_or_else(|| anyhow!("this token can see no ClickUp workspace"))
     }
 
-    fn my_user_id(&self) -> Result<u64> {
+    pub fn my_user_id(&self) -> Result<u64> {
         self.get("/user")?
             .pointer("/user/id")
             .and_then(Value::as_u64)
             .ok_or_else(|| anyhow!("GET /user returned no user id"))
     }
 
+    /// Every page of a task query (ClickUp pages hold 100), up to `MAX_PAGES`.
+    fn all_tasks(&self, path: &str) -> Result<Vec<Task>> {
+        const MAX_PAGES: u32 = 20;
+        let mut tasks = Vec::new();
+        for page in 0..MAX_PAGES {
+            let v = self.get(&format!("{path}&page={page}"))?;
+            let got = parse_task_list(&v);
+            let last = got.is_empty() || v.get("last_page").and_then(Value::as_bool).unwrap_or(true);
+            tasks.extend(got);
+            if last {
+                break;
+            }
+        }
+        Ok(tasks)
+    }
+
     /// Open tasks assigned to the token's user, most recently updated first.
     pub fn my_tasks(&self) -> Result<Vec<Task>> {
         let (team, me) = (self.team_id()?, self.my_user_id()?);
-        let v = self.get(&format!("/team/{team}/task?assignees[]={me}&subtasks=true&order_by=updated"))?;
-        Ok(parse_task_list(&v))
+        self.all_tasks(&format!("/team/{team}/task?assignees[]={me}&subtasks=true&order_by=updated"))
+    }
+
+    /// Open tasks in one list, subtasks and tasks added from other lists (as sprints do) included.
+    pub fn list_tasks(&self, list_id: &str) -> Result<Vec<Task>> {
+        self.all_tasks(&format!("/list/{list_id}/task?subtasks=true&include_timl=true&order_by=updated"))
+    }
+
+    /// `(id, name)` of the workspace's spaces, limited to `only` when it is not empty.
+    pub fn spaces(&self, only: &[String]) -> Result<Vec<(String, String)>> {
+        let team = self.team_id()?;
+        let v = self.get(&format!("/team/{team}/space?archived=false"))?;
+        let spaces = v.get("spaces").and_then(Value::as_array).cloned().unwrap_or_default();
+        Ok(spaces
+            .iter()
+            .filter_map(|s| Some((s.get("id")?.as_str()?.to_string(), s.get("name")?.as_str()?.to_string())))
+            .filter(|(id, _)| only.is_empty() || only.contains(id))
+            .collect())
+    }
+
+    /// Every unarchived list in a space, in folders or not.
+    pub fn space_lists(&self, space_id: &str, space_name: &str) -> Result<Vec<ListRef>> {
+        let folders = self.get(&format!("/space/{space_id}/folder?archived=false"))?;
+        let loose = self.get(&format!("/space/{space_id}/list?archived=false"))?;
+        Ok(parse_space_lists(space_name, &folders, &loose))
     }
 
     pub fn task(&self, id: &str) -> Result<Task> {

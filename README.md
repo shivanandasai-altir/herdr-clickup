@@ -2,9 +2,14 @@
 
 A [herdr](https://herdr.dev) plugin for ClickUp:
 
-- **My tasks**: a fuzzy picker over your open ClickUp tasks, in a popup.
-- **Start**: creates a worktree on `CU-<id>-<slug>`, starts an agent in it with the task as its first
-  prompt, and moves the task to *in progress*.
+- **Board** (`prefix+u`): a tab with your current sprints and every space → folder → list on the left,
+  and the selected list's tasks on the right.
+  `↑↓`/`jk` move · `⏎` open/expand · `s` start · `o` open in browser · `/` filter · `m` only mine ·
+  `tab` switch side · `r` refresh · `q` quit.
+- **My tasks** (`prefix+shift+u`): a quick fuzzy picker over your open tasks, in a popup.
+- **Start**: asks which coding agent to use (the installed ones herdr supports: claude, codex, pi, …;
+  your last pick comes first), creates a worktree on `CU-<id>-<slug>`, starts that agent in it with the
+  task as its first prompt, and moves the task to *in progress*.
 - **Report back**: when that agent finishes (`done`), comments on the task and moves it to *review*.
 - **Links**: Ctrl-click an `app.clickup.com/t/...` link in a terminal to open the task.
 
@@ -30,29 +35,38 @@ EOF
 |---|---|---|
 | `CLICKUP_TOKEN` | (required) | Personal API token |
 | `CLICKUP_TEAM_ID` | first workspace | ClickUp workspace (team) id |
-| `CLICKUP_AGENT` | `claude` | Any `herdr agent start --kind` value |
+| `CLICKUP_SPACE_IDS` | all spaces | Comma-separated space ids the board shows (the number after `/s/` in a space URL) |
+| `CLICKUP_AGENT` | claude | Agent offered first until you pick one |
 | `CLICKUP_STATUS_STARTED` | `in progress` | Status set on start; empty to skip |
 | `CLICKUP_STATUS_DONE` | `review` | Status set when the agent is done; empty to skip |
 
 Status names are per ClickUp space; a status that does not exist is skipped with a warning
 (see `herdr plugin log list --plugin ssk090.clickup`).
 
-Bind the picker to a key in `~/.config/herdr/config.toml`:
+Bind keys in `~/.config/herdr/config.toml`:
 
 ```toml
 [[keys.command]]
 key = "prefix+u"
 type = "plugin_action"
+command = "ssk090.clickup.board"
+description = "ClickUp board"
+
+[[keys.command]]
+key = "prefix+shift+u"
+type = "plugin_action"
 command = "ssk090.clickup.tasks"
-description = "ClickUp tasks"
+description = "ClickUp: my tasks (quick picker)"
 ```
+
+A sprint is any list with start and due dates; *Current sprints* shows those running today.
 
 Run it from a workspace inside the git repo the tasks belong to: the worktree is made from that
 workspace's repository.
 
 ## CLI
 
-`bin/run.sh list` prints your tasks; `bin/run.sh start <task-id>` starts one without the picker.
+`bin/run.sh list` prints your tasks; `bin/run.sh start <task-id> [agent]` starts one without the picker.
 
 ## Develop
 

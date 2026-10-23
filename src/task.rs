@@ -8,6 +8,13 @@ pub struct Task {
     pub status: String,
     pub url: String,
     pub description: String,
+    pub assignees: Vec<Assignee>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Assignee {
+    pub id: u64,
+    pub username: String,
 }
 
 fn text(v: &Value, key: &str) -> String {
@@ -32,6 +39,15 @@ pub fn parse_task(v: &Value) -> Option<Task> {
         status: v.pointer("/status/status").and_then(Value::as_str).unwrap_or_default().to_string(),
         url: text(v, "url"),
         description,
+        assignees: v
+            .get("assignees")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|u| Some(Assignee { id: u.get("id")?.as_u64()?, username: text(u, "username") }))
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -80,4 +96,17 @@ pub fn agent_prompt(t: &Task) -> String {
 pub fn agent_name(t: &Task) -> String {
     let id: String = t.id.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
     format!("cu-{id}").chars().take(32).collect()
+}
+
+/// Tasks whose name or id contains every word of `query` (any case), assigned to `mine` when given.
+pub fn filter_tasks<'a>(tasks: &'a [Task], query: &str, mine: Option<u64>) -> Vec<&'a Task> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    tasks
+        .iter()
+        .filter(|t| mine.is_none_or(|me| t.assignees.iter().any(|a| a.id == me)))
+        .filter(|t| {
+            let hay = format!("{} {}", t.id, t.name).to_lowercase();
+            words.iter().all(|w| hay.contains(w))
+        })
+        .collect()
 }

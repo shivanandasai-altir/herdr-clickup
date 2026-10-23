@@ -1,26 +1,28 @@
 use anyhow::{anyhow, bail, Result};
 use dialoguer::{FuzzySelect, Select};
 use herdr_clickup::{
+    app::{self, agent_options, client, set_status},
+    board,
     clickup::ClickUp,
     config::Config,
     herdr,
-    hook::{decide, Decision, Link},
+    hook::{decide, Decision},
     link::task_id_from_url,
     store,
-    task::{agent_name, agent_prompt, branch_name, Task},
+    task::Task,
 };
 use std::{env, io::BufRead, process::Command};
 
-const USAGE: &str = "usage: herdr-clickup <tasks|link|picker|task|list|start <id>|hook>";
+const USAGE: &str = "usage: herdr-clickup <board|tasks|link|picker|task|list|start <id> [agent]|hook>";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or_default();
-    let in_pane = matches!(cmd, "picker" | "task");
+    let in_pane = matches!(cmd, "board-pane" | "picker" | "task");
     if let Err(e) = run(cmd, &args[1.min(args.len())..]) {
         eprintln!("herdr-clickup: {e:#}");
         if in_pane {
-            // A popup closes when the process exits; keep the error on screen.
+            // A pane closes when the process exits; keep the error on screen.
             eprintln!("\nPress Enter to close.");
             let _ = std::io::stdin().lock().lines().next();
         }
@@ -30,7 +32,8 @@ fn main() {
 
 fn run(cmd: &str, rest: &[String]) -> Result<()> {
     match cmd {
-        // Actions: open a popup pane, then exit so herdr is not held up.
+        // Actions: open a pane, then exit so herdr is not held up.
+        "board" => herdr::open_pane("board", &[]),
         "tasks" => herdr::open_pane("picker", &[]),
         "link" => {
             let url = env::var("HERDR_PLUGIN_CLICKED_URL").unwrap_or_default();
@@ -38,6 +41,7 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
             herdr::open_pane("task", &[format!("CLICKUP_TASK_ID={id}")])
         }
         // Panes.
+        "board-pane" => board::run(),
         "picker" => picker(),
         "task" => {
             let id = env::var("CLICKUP_TASK_ID").map_err(|_| anyhow!("CLICKUP_TASK_ID is not set"))?;
@@ -47,11 +51,6 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
             task_menu(&cfg, &cu, &task)
         }
         // Plumbing.
-        "start" => {
-            let id = rest.first().ok_or_else(|| anyhow!("start needs a task id"))?;
-            let (cfg, cu) = client()?;
-            start(&cfg, &cu, &cu.task(id)?)
-        }
         "list" => {
             let (_, cu) = client()?;
             for t in cu.my_tasks()? {
@@ -59,15 +58,19 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
             }
             Ok(())
         }
+        "start" => {
+            let id = rest.first().ok_or_else(|| anyhow!("start needs a task id"))?;
+            let (cfg, cu) = client()?;
+            let agent = match rest.get(1) {
+                Some(a) => a.clone(),
+                None => agent_options(&cfg).into_iter().next().ok_or_else(|| anyhow!("no supported agent installed"))?,
+            };
+            println!("{}", app::start(&cfg, &cu, &cu.task(id)?, &agent)?);
+            Ok(())
+        }
         "hook" => hook(),
         _ => bail!("{USAGE}"),
     }
-}
-
-fn client() -> Result<(Config, ClickUp)> {
-    let cfg = Config::load()?;
-    let cu = ClickUp::new(cfg.token.clone(), cfg.team_id.clone());
-    Ok((cfg, cu))
 }
 
 fn picker() -> Result<()> {
@@ -85,30 +88,23 @@ fn picker() -> Result<()> {
 }
 
 fn task_menu(cfg: &Config, cu: &ClickUp, task: &Task) -> Result<()> {
-    let start_label = format!("Start: new worktree + {}", cfg.agent);
-    let choices = [start_label.as_str(), "Open in browser", "Cancel"];
+    let choices = ["Start: new worktree + agent", "Open in browser", "Cancel"];
     match Select::new().with_prompt(&task.name).items(choices).default(0).interact_opt()? {
-        Some(0) => start(cfg, cu, task),
+        Some(0) => {
+            let agents = agent_options(cfg);
+            if agents.is_empty() {
+                bail!("no supported coding agent is installed");
+            }
+            let Some(a) = Select::new().with_prompt("Agent").items(&agents).default(0).interact_opt()? else {
+                return Ok(());
+            };
+            println!("Starting {}…", agents[a]);
+            println!("{}", app::start(cfg, cu, task, &agents[a])?);
+            Ok(())
+        }
         Some(1) => open_url(&task.url),
         _ => Ok(()),
     }
-}
-
-/// Worktree on `CU-<id>-<slug>`, an agent in it with the task as its prompt, and the task marked started.
-fn start(cfg: &Config, cu: &ClickUp, task: &Task) -> Result<()> {
-    let branch = branch_name(task);
-    println!("Creating worktree {branch}…");
-    let wt = herdr::create_worktree(&branch, &task.name)?;
-    // Linked before the agent starts, so the hook sees its first status change.
-    let link = Link { task_id: task.id.clone(), branch: branch.clone(), working: false, reported: false };
-    store::update(|state| state.panes.insert(wt.pane_id.clone(), link))?;
-    println!("Starting {} in {}…", cfg.agent, wt.pane_id);
-    herdr::start_agent(&agent_name(task), &cfg.agent, &wt.pane_id)?;
-    herdr::prompt_agent(&wt.pane_id, &agent_prompt(task))?;
-
-    set_status(cu, &task.id, cfg.status_started.as_deref());
-    herdr::notify("ClickUp task started", &format!("{} → {}", task.name, wt.workspace_id));
-    Ok(())
 }
 
 fn hook() -> Result<()> {
@@ -128,18 +124,12 @@ fn hook() -> Result<()> {
     if let Decision::Report { task_id, branch, .. } = decision {
         let (cfg, cu) = client()?;
         cu.comment(&task_id, &format!("herdr agent finished its turn on branch `{branch}`."))?;
-        set_status(&cu, &task_id, cfg.status_done.as_deref());
+        if let Some(warning) = set_status(&cu, &task_id, cfg.status_done.as_deref()) {
+            eprintln!("warning: {warning}");
+        }
         herdr::notify("ClickUp task updated", &format!("{task_id}: agent done on {branch}"));
     }
     Ok(())
-}
-
-/// Status names differ per ClickUp space, so a missing one is a warning, not a failure.
-fn set_status(cu: &ClickUp, task_id: &str, status: Option<&str>) {
-    let Some(s) = status else { return };
-    if let Err(e) = cu.set_status(task_id, s) {
-        eprintln!("warning: could not set status \"{s}\": {e:#}");
-    }
 }
 
 fn open_url(url: &str) -> Result<()> {
