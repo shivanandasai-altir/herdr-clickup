@@ -34,8 +34,15 @@ pub enum Decision {
 }
 
 /// What to do about one herdr event (`{ event, data: { pane_id, agent_status, .. } }`).
+/// The event's name with dots turned into underscores: herdr sends `pane_agent_status_changed` while
+/// manifests subscribe with `pane.agent_status_changed`.
+fn event_name(event: &Value) -> String {
+    event.get("event").and_then(Value::as_str).unwrap_or_default().replace('.', "_")
+}
+
 pub fn decide(event: &Value, state: &State) -> Decision {
-    if event.get("event").and_then(Value::as_str) == Some("worktree.removed") {
+    let name = event_name(event);
+    if name == "worktree_removed" {
         let Some(ws) = event.pointer("/data/workspace_id").and_then(Value::as_str) else {
             return Decision::Nothing;
         };
@@ -50,13 +57,12 @@ pub fn decide(event: &Value, state: &State) -> Decision {
         return Decision::Nothing;
     };
     let status = event.pointer("/data/agent_status").and_then(Value::as_str);
-    match event.get("event").and_then(Value::as_str) {
-        Some("pane.agent_status_changed") if status == Some("working") && !link.working => {
+    match name.as_str() {
+        "pane_agent_status_changed" if status == Some("working") && !link.working => {
             Decision::MarkWorking { pane_id: pane_id.to_string() }
         }
         // idle is a finish herdr has already shown the user; done is one nobody has seen yet.
-        Some("pane.agent_status_changed")
-            if matches!(status, Some("idle" | "done")) && link.working && !link.reported =>
+        "pane_agent_status_changed" if matches!(status, Some("idle" | "done")) && link.working && !link.reported =>
         {
             Decision::Report {
             pane_id: pane_id.to_string(),
@@ -64,7 +70,7 @@ pub fn decide(event: &Value, state: &State) -> Decision {
                 branch: link.branch.clone(),
             }
         }
-        Some("pane.closed") => Decision::Forget { pane_id: pane_id.to_string() },
+        "pane_closed" => Decision::Forget { pane_id: pane_id.to_string() },
         _ => Decision::Nothing,
     }
 }

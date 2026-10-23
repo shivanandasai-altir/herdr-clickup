@@ -15,12 +15,19 @@ fn state(reported: bool) -> State {
     link(true, reported)
 }
 
-// The shape herdr 0.9.x puts in HERDR_PLUGIN_EVENT_JSON.
+// Captured from herdr 0.9.5's HERDR_PLUGIN_EVENT_JSON: event names use underscores, though the
+// manifest subscribes with dots (`pane.agent_status_changed`).
 fn status_event(pane: &str, status: &str) -> serde_json::Value {
     json!({
-        "event": "pane.agent_status_changed",
-        "data": { "pane_id": pane, "workspace_id": "w3", "agent_status": status, "agent": "claude" }
+        "event": "pane_agent_status_changed",
+        "data": { "type": "pane_agent_status_changed", "pane_id": pane, "workspace_id": "w3", "agent_status": status, "agent": "claude" }
     })
+}
+
+#[test]
+fn dotted_event_names_are_accepted_too() {
+    let ev = json!({ "event": "pane.agent_status_changed", "data": { "pane_id": "w3:t1:p1", "agent_status": "done" } });
+    assert!(matches!(decide(&ev, &state(false)), Decision::Report { .. }));
 }
 
 #[test]
@@ -76,7 +83,7 @@ fn unlinked_panes_do_nothing() {
 
 #[test]
 fn closing_a_linked_pane_forgets_it() {
-    let ev = json!({ "event": "pane.closed", "data": { "pane_id": "w3:t1:p1" } });
+    let ev = json!({ "event": "pane_closed", "data": { "type": "pane_closed", "pane_id": "w3:t1:p1" } });
     assert_eq!(decide(&ev, &state(true)), Decision::Forget { pane_id: "w3:t1:p1".into() });
 }
 
@@ -88,13 +95,13 @@ fn garbage_does_nothing() {
 
 #[test]
 fn removing_a_worktree_forgets_its_workspaces_links() {
-    let ev = json!({ "event": "worktree.removed", "data": { "workspace_id": "w3", "forced": true, "worktree": {} } });
+    let ev = json!({ "event": "worktree_removed", "data": { "type": "worktree_removed", "workspace_id": "w3", "forced": true, "worktree": {} } });
     assert_eq!(decide(&ev, &state(false)), Decision::ForgetWorkspace { workspace_id: "w3".into() });
 }
 
 #[test]
 fn removing_an_unlinked_worktree_does_nothing() {
     // w30 must not match the w3:… panes.
-    let ev = json!({ "event": "worktree.removed", "data": { "workspace_id": "w30" } });
+    let ev = json!({ "event": "worktree_removed", "data": { "workspace_id": "w30" } });
     assert_eq!(decide(&ev, &state(false)), Decision::Nothing);
 }
