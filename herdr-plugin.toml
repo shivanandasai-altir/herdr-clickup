@@ -1,0 +1,51 @@
+id = "ssk090.clickup"
+name = "ClickUp"
+version = "0.1.0"
+# Verified on 0.9.5; 0.9.3 is the first with the event JSON shape the hook reads.
+min_herdr_version = "0.9.3"
+description = "Pick your ClickUp tasks, start an agent on one in its own worktree, and report back when it is done."
+platforms = ["macos", "linux"]
+
+# Commands go through bin/run.sh, which runs the binary built by `cargo build --release`.
+[[build]]
+command = ["sh", "bin/build.sh"]
+
+[[actions]]
+id = "tasks"
+title = "ClickUp: my tasks"
+command = ["sh", "bin/run.sh", "tasks"]
+
+[[actions]]
+id = "link"
+title = "ClickUp: open clicked task"
+command = ["sh", "bin/run.sh", "link"]
+
+[[link_handlers]]
+id = "task-url"
+title = "Open ClickUp task"
+pattern = "^https://app\\.clickup\\.com/t/[A-Za-z0-9/_-]+"
+action = "link"
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["sh", "bin/run.sh", "hook"]
+
+[[events]]
+on = "pane.closed"
+command = ["sh", "bin/run.sh", "hook"]
+
+[[panes]]
+id = "picker"
+title = "ClickUp tasks"
+placement = "popup"
+width = "80%"
+height = "70%"
+command = ["sh", "bin/run.sh", "picker"]
+
+[[panes]]
+id = "task"
+title = "ClickUp task"
+placement = "popup"
+width = "80%"
+height = "70%"
+command = ["sh", "bin/run.sh", "task"]
