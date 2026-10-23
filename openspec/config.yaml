@@ -1,0 +1,9 @@
+schema: spec-driven
+
+# Project context (optional)
+context: |
+  herdr-clickup is a Rust herdr plugin (edition 2024, let-chains) that lists ClickUp tasks,
+  starts a coding agent in a git worktree, and reports back to ClickUp only after approval.
+  Keep the TUI in ratatui, HTTP in ureq, and tests as integration tests under tests/.
+  Never write to ClickUp without an explicit user approval.
+  Supported platforms are macOS and Linux: the code uses Unix permissions and sh wrappers.

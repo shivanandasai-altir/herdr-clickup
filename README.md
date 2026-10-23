@@ -89,3 +89,14 @@ herdr plugin log list --plugin ssk090.clickup
 ```
 
 State (pane → task links) lives in `$HERDR_PLUGIN_STATE_DIR/panes.json`.
+
+## Specs
+
+This repo uses [OpenSpec](https://openspec.dev). Specs live in `openspec/specs`, and each change
+starts as a folder in `openspec/changes` with a proposal, spec deltas and tasks.
+
+```sh
+openspec list                 # changes in flight
+openspec validate --all       # every change and spec
+openspec archive <change>     # after merge: apply the deltas to openspec/specs
+```
