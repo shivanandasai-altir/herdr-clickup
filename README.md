@@ -4,16 +4,18 @@ A [herdr](https://herdr.dev) plugin for ClickUp:
 
 - **Board** (`prefix+u`): a tab with your current sprints and every space → folder → list on the left,
   and the selected list's tasks on the right.
-  `↑↓`/`jk` move · `⏎` open/expand · `s` write spec · `c` code now · `u` review a drafted update (✉) · `o` open in browser · `/` filter · `m` only mine ·
+  `↑↓`/`jk` move · `⏎` open/expand · `s` write spec · `i` implement a drafted spec · `c` code now · `u` review a drafted update (✉) · `o` open in browser · `/` filter · `m` only mine ·
+  the PHASE column shows `spec…`, `spec ✓`, `code…` or `done` ·
   `a` pick an assignee (everyone, me, unassigned, or anyone in the list) ·
   `tab` switch side · `r` refresh · `q` quit.
 - **My tasks** (`prefix+shift+u`): a quick fuzzy picker over your open tasks, in a popup.
 - **Write spec** (`s`, the default): asks which agent and which repo (repos open in your herdr
   workspaces; last picks first), creates a worktree on `CU-<id>-<slug>`, sets up
   [OpenSpec](https://openspec.dev) there if the repo has none, creates the change `cu-<id>-<slug>` with
-  the whole ticket (description, checklists, subtasks, attachments, comments) in its `clickup.md`, and
+  the whole ticket (description, checklists, subtasks, attachments, comments, custom fields, parent) in its `clickup.md`, and
   has the agent write the proposal, specs, design and tasks, with no code. Review it with
-  [herdr-openspec](https://github.com/FlorisKr/herdr-openspec) (`prefix+t`). Needs the `openspec` CLI.
+  [herdr-openspec](https://github.com/FlorisKr/herdr-openspec) (`prefix+t`), then press `i` to have the
+  same agent implement it. Needs the `openspec` CLI.
 - **Code now** (`c`): the same worktree and agent, but the agent gets the whole ticket and starts
   coding; the task moves to *in progress*.
 - If the agent asks something at startup (e.g. "trust this folder?"), answer it in the new

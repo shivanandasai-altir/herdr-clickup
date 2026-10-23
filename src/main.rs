@@ -1,20 +1,19 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use dialoguer::{FuzzySelect, Select};
 use herdr_clickup::{
-    app::{self, agent_options, client, open_url, repo_options, Mode, NO_AGENT, NO_REPO},
+    app::{self, Mode, NO_AGENT, NO_REPO, agent_options, client, open_url, repo_options},
     board,
     clickup::ClickUp,
     config::Config,
     herdr,
-    hook::{decide, proposed_update, Decision},
+    hook::{Decision, Phase, decide, proposed_update},
     link::task_id_from_url,
     store,
     task::Task,
 };
 use std::{env, io::BufRead};
 
-const USAGE: &str =
-    "usage: herdr-clickup <board|tasks|link|picker|task|list|start [--code] <id> [agent] [repo]|hook>";
+const USAGE: &str = "usage: herdr-clickup <board|tasks|link|picker|task|list|start [--code] <id> [agent] [repo]|hook>";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -38,17 +37,25 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
         "tasks" => herdr::open_pane("picker", &[]),
         "link" => {
             let url = env::var("HERDR_PLUGIN_CLICKED_URL").unwrap_or_default();
-            let id = task_id_from_url(&url).ok_or_else(|| anyhow!("not a ClickUp task link: {url}"))?;
+            let id =
+                task_id_from_url(&url).ok_or_else(|| anyhow!("not a ClickUp task link: {url}"))?;
             herdr::open_pane("task", &[format!("CLICKUP_TASK_ID={id}")])
         }
         // Panes.
         "board-pane" => board::run(),
         "picker" => picker(),
         "task" => {
-            let id = env::var("CLICKUP_TASK_ID").map_err(|_| anyhow!("CLICKUP_TASK_ID is not set"))?;
+            let id =
+                env::var("CLICKUP_TASK_ID").map_err(|_| anyhow!("CLICKUP_TASK_ID is not set"))?;
             let (cfg, cu) = client()?;
             let task = cu.task(&id)?;
-            println!("{}  [{}]\n{}\n\n{}\n", task.name, task.status, task.url, task.description.trim());
+            println!(
+                "{}  [{}]\n{}\n\n{}\n",
+                task.name,
+                task.status,
+                task.url,
+                task.description.trim()
+            );
             task_menu(&cfg, &cu, &task)
         }
         // Plumbing.
@@ -61,19 +68,42 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
         }
         "start" => {
             // Spec first unless --code.
-            let mode = if rest.first().map(String::as_str) == Some("--code") { Mode::Code } else { Mode::Spec };
+            let mode = if rest.first().map(String::as_str) == Some("--code") {
+                Mode::Code
+            } else {
+                Mode::Spec
+            };
             let rest = if mode == Mode::Code { &rest[1..] } else { rest };
-            let id = rest.first().ok_or_else(|| anyhow!("start needs a task id"))?;
+            let id = rest
+                .first()
+                .ok_or_else(|| anyhow!("start needs a task id"))?;
             let (cfg, cu) = client()?;
             let agent = match rest.get(1) {
                 Some(a) => a.clone(),
-                None => agent_options(&cfg).into_iter().next().ok_or_else(|| anyhow!(NO_AGENT))?,
+                None => agent_options(&cfg)
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!(NO_AGENT))?,
             };
             let repo = match rest.get(2) {
                 Some(r) => r.clone(),
-                None => repo_options().into_iter().next().ok_or_else(|| anyhow!(NO_REPO))?,
+                None => repo_options()
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!(NO_REPO))?,
             };
-            println!("{}", app::start(&cfg, &cu, &cu.task(id)?, &agent, &repo, mode, &|m| println!("{m}"))?);
+            println!(
+                "{}",
+                app::start(
+                    &cfg,
+                    &cu,
+                    &cu.task(id)?,
+                    &agent,
+                    &repo,
+                    mode,
+                    &|m| println!("{m}")
+                )?
+            );
             Ok(())
         }
         "hook" => hook(),
@@ -88,16 +118,34 @@ fn picker() -> Result<()> {
     if tasks.is_empty() {
         bail!("no open tasks are assigned to you");
     }
-    let items: Vec<String> = tasks.iter().map(|t| format!("[{}] {}", t.status, t.name)).collect();
-    let Some(i) = FuzzySelect::new().with_prompt("Task").items(&items).default(0).interact_opt()? else {
+    let items: Vec<String> = tasks
+        .iter()
+        .map(|t| format!("[{}] {}", t.status, t.name))
+        .collect();
+    let Some(i) = FuzzySelect::new()
+        .with_prompt("Task")
+        .items(&items)
+        .default(0)
+        .interact_opt()?
+    else {
         return Ok(());
     };
     task_menu(&cfg, &cu, &tasks[i])
 }
 
 fn task_menu(cfg: &Config, cu: &ClickUp, task: &Task) -> Result<()> {
-    let choices = ["Write the spec first (OpenSpec)", "Start coding now", "Open in browser", "Cancel"];
-    let mode = match Select::new().with_prompt(&task.name).items(choices).default(0).interact_opt()? {
+    let choices = [
+        "Write the spec first (OpenSpec)",
+        "Start coding now",
+        "Open in browser",
+        "Cancel",
+    ];
+    let mode = match Select::new()
+        .with_prompt(&task.name)
+        .items(choices)
+        .default(0)
+        .interact_opt()?
+    {
         Some(0) => Mode::Spec,
         Some(1) => Mode::Code,
         Some(2) => return open_url(&task.url),
@@ -107,18 +155,33 @@ fn task_menu(cfg: &Config, cu: &ClickUp, task: &Task) -> Result<()> {
     if agents.is_empty() {
         bail!(NO_AGENT);
     }
-    let Some(a) = Select::new().with_prompt("Agent").items(&agents).default(0).interact_opt()? else {
+    let Some(a) = Select::new()
+        .with_prompt("Agent")
+        .items(&agents)
+        .default(0)
+        .interact_opt()?
+    else {
         return Ok(());
     };
     let repos = repo_options();
     if repos.is_empty() {
         bail!(NO_REPO);
     }
-    let Some(r) = Select::new().with_prompt("Repo").items(&repos).default(0).interact_opt()? else {
+    let Some(r) = Select::new()
+        .with_prompt("Repo")
+        .items(&repos)
+        .default(0)
+        .interact_opt()?
+    else {
         return Ok(());
     };
     println!("Starting {} in {}…", agents[a], repos[r]);
-    println!("{}", app::start(cfg, cu, task, &agents[a], &repos[r], mode, &|m| println!("{m}"))?);
+    println!(
+        "{}",
+        app::start(cfg, cu, task, &agents[a], &repos[r], mode, &|m| println!(
+            "{m}"
+        ))?
+    );
     Ok(())
 }
 
@@ -134,28 +197,50 @@ fn hook() -> Result<()> {
         let d = decide(&event, state);
         match &d {
             Decision::Nothing => {}
-            Decision::MarkWorking { pane_id } => state.panes.get_mut(pane_id).into_iter().for_each(|l| l.working = true),
-            Decision::Report { pane_id, branch, change, .. } => {
+            Decision::MarkWorking { pane_id } => state
+                .panes
+                .get_mut(pane_id)
+                .into_iter()
+                .for_each(|l| l.working = true),
+            Decision::Report {
+                pane_id,
+                branch,
+                change,
+                phase,
+                ..
+            } => {
                 let update = proposed_update(
                     branch,
                     change.as_deref(),
+                    *phase,
                     cfg.as_ref().and_then(|c| c.status_done.as_deref()),
                     cfg.as_ref().and_then(|c| c.status_spec.as_deref()),
                 );
                 if let Some(l) = state.panes.get_mut(pane_id) {
                     l.reported = true;
+                    l.reported_as();
                     l.pending = Some(update);
                 }
             }
             Decision::Forget { pane_id } => drop(state.panes.remove(pane_id)),
-            Decision::ForgetWorkspace { workspace_id } => {
-                state.panes.retain(|pane, _| pane.split(':').next() != Some(workspace_id.as_str()))
-            }
+            Decision::ForgetWorkspace { workspace_id } => state
+                .panes
+                .retain(|pane, _| pane.split(':').next() != Some(workspace_id.as_str())),
         }
         d
     })?;
-    if let Decision::Report { task_id, change, .. } = decision {
-        let what = if change.is_some() { "spec drafted" } else { "agent finished" };
+    if let Decision::Report {
+        task_id,
+        change,
+        phase,
+        ..
+    } = decision
+    {
+        let what = match (change.is_some(), phase) {
+            (false, _) => "agent finished",
+            (true, Phase::Implementing | Phase::Done) => "implementation done",
+            (true, _) => "spec drafted",
+        };
         herdr::notify(
             &format!("ClickUp {task_id}: {what}"),
             "A ClickUp update is drafted. Review it on the ClickUp board (u); nothing is posted until you approve it.",

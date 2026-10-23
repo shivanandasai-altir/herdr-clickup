@@ -4,21 +4,20 @@ use crate::{
     clickup::ClickUp,
     config::Config,
     herdr,
-    hook::{Link, Update},
-    repos,
-    store,
-    openspec,
-    task::{agent_name, branch_name, Task},
-    ticket::{code_prompt, spec_prompt, ticket_markdown},
+    hook::{Link, Phase, Update},
+    openspec, repos, store,
+    task::{Task, agent_name, branch_name},
+    ticket::{apply_prompt, code_prompt, spec_prompt, ticket_markdown},
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::{fs, path::Path, process::Command};
 
 /// How long a start waits for the user to answer an agent's startup question.
 const READY_TIMEOUT_MS: u64 = 15 * 60 * 1000;
 
 pub const NO_AGENT: &str = "no supported coding agent is installed";
-pub const NO_REPO: &str = "no git repo is open in a herdr workspace; open the task's repo in herdr first";
+pub const NO_REPO: &str =
+    "no git repo is open in a herdr workspace; open the task's repo in herdr first";
 
 pub fn client() -> Result<(Config, ClickUp)> {
     let cfg = Config::load()?;
@@ -87,20 +86,39 @@ pub fn start(
             let change_dir = openspec::new_change(dir, &change, &task.name)?;
             let ticket_file = change_dir.join("clickup.md");
             fs::write(&ticket_file, ticket_markdown(&ticket))?;
-            let rel = ticket_file.strip_prefix(dir).unwrap_or(&ticket_file).display().to_string();
+            let rel = ticket_file
+                .strip_prefix(dir)
+                .unwrap_or(&ticket_file)
+                .display()
+                .to_string();
             (spec_prompt(task, &change, &rel), Some(change))
         }
     };
 
     // Linked before the agent starts, so the hook sees its first status change.
-    let link = Link { task_id: task.id.clone(), branch: branch.clone(), change: change.clone(), working: false, reported: false, pending: None };
+    let phase = match mode {
+        Mode::Spec => Phase::SpecDrafting,
+        Mode::Code => Phase::Implementing,
+    };
+    let link = Link {
+        task_id: task.id.clone(),
+        branch: branch.clone(),
+        change: change.clone(),
+        phase: Some(phase),
+        working: false,
+        reported: false,
+        pending: None,
+    };
     store::update(|state| state.panes.insert(wt.pane_id.clone(), link))?;
     if let Err(e) = herdr::start_agent(&agent_name(task), agent, &wt.pane_id) {
         // Usually the agent asking whether to trust the new worktree folder: the user's call, not ours.
         if !format!("{e:#}").contains("agent_not_ready") {
             return Err(e);
         }
-        progress(format!("{agent} is asking something in workspace {} (e.g. trust this folder?) — answer it there; the task is sent once it is ready", wt.workspace_id));
+        progress(format!(
+            "{agent} is asking something in workspace {} (e.g. trust this folder?) — answer it there; the task is sent once it is ready",
+            wt.workspace_id
+        ));
         herdr::wait_until_idle(&wt.pane_id, READY_TIMEOUT_MS)?;
     }
     herdr::prompt_agent(&wt.pane_id, &prompt)?;
@@ -120,13 +138,43 @@ pub fn start(
     if !notes.is_empty() {
         summary.push_str(&format!(" ({})", notes.join("; ")));
     }
-    herdr::notify("ClickUp task started", &format!("{} → {agent} in {}", task.name, wt.workspace_id));
+    herdr::notify(
+        "ClickUp task started",
+        &format!("{} → {agent} in {}", task.name, wt.workspace_id),
+    );
     Ok(summary)
+}
+
+/// Sends the apply workflow of an approved change to the agent in `pane_id`, and makes the next finish
+/// report the implementation rather than the spec.
+pub fn implement(pane_id: &str, change: &str) -> Result<String> {
+    // Claim the next finish before the agent starts, so a status event cannot slip in between.
+    store::update(|state| {
+        state
+            .panes
+            .get_mut(pane_id)
+            .into_iter()
+            .for_each(Link::implementing)
+    })?;
+    if let Err(e) = herdr::prompt_agent(pane_id, &apply_prompt(change)) {
+        let _ = store::update(|state| {
+            if let Some(l) = state.panes.get_mut(pane_id) {
+                l.phase = Some(Phase::SpecDrafted);
+                l.reported = true;
+            }
+        });
+        return Err(e);
+    }
+    Ok(format!("sent the apply workflow for {change}"))
 }
 
 /// Opens `url` in the default browser without waiting for it.
 pub fn open_url(url: &str) -> Result<()> {
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
     Command::new(opener).arg(url).spawn()?;
     Ok(())
 }
@@ -146,11 +194,19 @@ pub fn post_update(cu: &ClickUp, task_id: &str, update: &Update) -> Result<Strin
 
 /// Drops the drafted update of every link to `task_id`.
 pub fn clear_pending(task_id: &str) -> Result<()> {
-    store::update(|state| state.panes.values_mut().filter(|l| l.task_id == task_id).for_each(|l| l.pending = None))
+    store::update(|state| {
+        state
+            .panes
+            .values_mut()
+            .filter(|l| l.task_id == task_id)
+            .for_each(|l| l.pending = None)
+    })
 }
 
 /// Status names differ per ClickUp space, so a missing one is a warning, not a failure.
 pub fn set_status(cu: &ClickUp, task_id: &str, status: Option<&str>) -> Option<String> {
     let s = status?;
-    cu.set_status(task_id, s).err().map(|e| format!("could not set status \"{s}\": {e:#}"))
+    cu.set_status(task_id, s)
+        .err()
+        .map(|e| format!("could not set status \"{s}\": {e:#}"))
 }

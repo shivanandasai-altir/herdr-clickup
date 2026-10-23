@@ -4,23 +4,25 @@ use crate::{
     app::{self, Mode, NO_AGENT, NO_REPO},
     clickup::ClickUp,
     config::Config,
-    hierarchy::{current_sprints, ListRef},
-    hook::Update,
+    hierarchy::{ListRef, current_sprints},
+    hook::{Link, Phase, Update},
     store,
-    task::{assignees_in, filter_tasks, Task, Who},
+    task::{Task, Who, assignees_in, filter_tasks},
 };
 use anyhow::Result;
 use ratatui::{
+    DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap},
-    DefaultTerminal, Frame,
+    widgets::{
+        Block, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
+    },
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::mpsc::{Receiver, Sender, channel},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -62,6 +64,8 @@ enum Msg {
     Progress(String),
     /// An approved update was posted (or failed).
     Posted(Result<String>),
+    /// The apply workflow was sent to an agent (or could not be).
+    Implemented(Result<String>),
 }
 
 #[derive(Clone)]
@@ -83,13 +87,30 @@ enum Modal {
     None,
     Detail,
     /// Holds the task itself: the table can reload while the modal is open.
-    Agent { task: Task, mode: Mode, choices: Vec<String>, sel: usize },
+    Agent {
+        task: Task,
+        mode: Mode,
+        choices: Vec<String>,
+        sel: usize,
+    },
     /// A drafted ClickUp update, shown in full; posted only on Enter.
-    Update { task: Task, update: Update },
+    Update {
+        task: Task,
+        update: Update,
+    },
     /// Whose tasks to show: everyone, me, unassigned, or one person.
-    Who { choices: Vec<(String, Who)>, sel: usize },
+    Who {
+        choices: Vec<(String, Who)>,
+        sel: usize,
+    },
     /// Second step of a start: the agent is chosen, now the repo.
-    Repo { task: Task, mode: Mode, agent: String, choices: Vec<String>, sel: usize },
+    Repo {
+        task: Task,
+        mode: Mode,
+        agent: String,
+        choices: Vec<String>,
+        sel: usize,
+    },
 }
 
 #[derive(PartialEq)]
@@ -121,7 +142,9 @@ struct Board {
     who_label: String,
     modal: Modal,
     status: String,
-    /// Drafted ClickUp updates by task id, waiting for approval; reread from the state file.
+    /// Pane→task links by task id, reread from the state file: phase, branch and pane.
+    links: HashMap<String, (String, Link)>,
+    /// Drafted ClickUp updates by task id, waiting for approval.
     pending: HashMap<String, Update>,
     pending_read: std::time::Instant,
     /// Tasks being started, so a second `s` cannot start a second worktree.
@@ -140,7 +163,10 @@ pub fn run() -> Result<()> {
 const REFRESHING: &str = "refreshing…";
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or_default()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or_default()
 }
 
 fn space_key(space: &str) -> String {
@@ -177,6 +203,7 @@ impl Board {
             modal: Modal::None,
             status: String::new(),
             starting: HashSet::new(),
+            links: HashMap::new(),
             pending: HashMap::new(),
             pending_read: std::time::Instant::now() - Duration::from_secs(60),
             quit: false,
@@ -189,7 +216,7 @@ impl Board {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.quit {
             if self.pending_read.elapsed() > Duration::from_secs(1) {
-                self.read_pending();
+                self.read_state();
             }
             terminal.draw(|f| self.draw(f))?;
             while let Ok(msg) = self.rx.try_recv() {
@@ -218,9 +245,13 @@ impl Board {
                 let spaces = cu.spaces(&only)?;
                 // One space's folders and lists per thread: a workspace can have dozens of spaces.
                 let results: Vec<Result<Vec<ListRef>>> = thread::scope(|s| {
-                    let jobs: Vec<_> =
-                        spaces.iter().map(|(id, name)| s.spawn(|| cu.space_lists(id, name))).collect();
-                    jobs.into_iter().map(|j| j.join().expect("space thread panicked")).collect()
+                    let jobs: Vec<_> = spaces
+                        .iter()
+                        .map(|(id, name)| s.spawn(|| cu.space_lists(id, name)))
+                        .collect();
+                    jobs.into_iter()
+                        .map(|j| j.join().expect("space thread panicked"))
+                        .collect()
                 });
                 // One unreadable space should not hide the others.
                 let failed = results.iter().filter(|r| r.is_err()).count();
@@ -252,7 +283,8 @@ impl Board {
                 self.loading_hierarchy = false;
                 self.done_refreshing();
                 if failed > 0 {
-                    self.status = format!("{failed} space(s) could not be loaded; press r to retry");
+                    self.status =
+                        format!("{failed} space(s) could not be loaded; press r to retry");
                 }
                 // With a single space there is nothing to choose: open it.
                 if let [(_, name)] = spaces.as_slice() {
@@ -279,7 +311,12 @@ impl Board {
             Msg::Progress(m) => self.status = m,
             Msg::Posted(result) => {
                 self.status = result.unwrap_or_else(|e| format!("posting failed: {e:#}"));
-                self.read_pending();
+                self.read_state();
+            }
+            Msg::Implemented(result) => {
+                self.status =
+                    result.unwrap_or_else(|e| format!("could not start the implementation: {e:#}"));
+                self.read_state();
             }
             Msg::Started(task_id, result) => {
                 self.starting.remove(&task_id);
@@ -287,17 +324,26 @@ impl Board {
                     Ok(summary) => summary,
                     Err(e) => format!("start failed: {e:#}"),
                 };
+                self.read_state();
             }
         }
     }
 
-    fn read_pending(&mut self) {
+    fn read_state(&mut self) {
         self.pending_read = std::time::Instant::now();
-        self.pending = store::read()
-            .panes
-            .into_values()
-            .filter_map(|l| Some((l.task_id, l.pending?)))
+        let panes = store::read().panes;
+        self.pending = panes
+            .values()
+            .filter_map(|l| Some((l.task_id.clone(), l.pending.clone()?)))
             .collect();
+        self.links = panes
+            .into_iter()
+            .map(|(pane, link)| (link.task_id.clone(), (pane, link)))
+            .collect();
+    }
+
+    fn phase_of(&self, task_id: &str) -> Option<Phase> {
+        self.links.get(task_id).map(|(_, l)| l.phase())
     }
 
     fn done_refreshing(&mut self) {
@@ -309,17 +355,33 @@ impl Board {
     // ---- derived views ----
 
     fn side_rows(&self) -> Vec<SideRow> {
-        let mut rows = vec![SideRow { depth: 0, label: "★ My tasks".into(), kind: RowKind::Mine }];
+        let mut rows = vec![SideRow {
+            depth: 0,
+            label: "★ My tasks".into(),
+            kind: RowKind::Mine,
+        }];
         let sprints = current_sprints(&self.lists, now_ms());
         if !sprints.is_empty() {
-            rows.push(SideRow { depth: 0, label: "Current sprints".into(), kind: RowKind::Header });
+            rows.push(SideRow {
+                depth: 0,
+                label: "Current sprints".into(),
+                kind: RowKind::Header,
+            });
             for l in sprints {
-                rows.push(SideRow { depth: 1, label: list_label(l), kind: RowKind::List(l.clone()) });
+                rows.push(SideRow {
+                    depth: 1,
+                    label: list_label(l),
+                    kind: RowKind::List(l.clone()),
+                });
             }
         }
         for (_, space) in &self.spaces {
             let open = self.expanded.contains(&space_key(space));
-            rows.push(SideRow { depth: 0, label: format!("{} {space}", arrow(open)), kind: RowKind::Space(space.clone()) });
+            rows.push(SideRow {
+                depth: 0,
+                label: format!("{} {space}", arrow(open)),
+                kind: RowKind::Space(space.clone()),
+            });
             if !open {
                 continue;
             }
@@ -328,16 +390,32 @@ impl Board {
                 match l.folder.as_deref() {
                     Some(f) if !folders.contains(&f) => folders.push(f),
                     Some(_) => {}
-                    None => rows.push(SideRow { depth: 1, label: list_label(l), kind: RowKind::List(l.clone()) }),
+                    None => rows.push(SideRow {
+                        depth: 1,
+                        label: list_label(l),
+                        kind: RowKind::List(l.clone()),
+                    }),
                 }
             }
             for f in folders {
                 let key = folder_key(space, f);
                 let open = self.expanded.contains(&key);
-                rows.push(SideRow { depth: 1, label: format!("{} {f}", arrow(open)), kind: RowKind::Folder(key) });
+                rows.push(SideRow {
+                    depth: 1,
+                    label: format!("{} {f}", arrow(open)),
+                    kind: RowKind::Folder(key),
+                });
                 if open {
-                    for l in self.lists.iter().filter(|l| &l.space == space && l.folder.as_deref() == Some(f)) {
-                        rows.push(SideRow { depth: 2, label: list_label(l), kind: RowKind::List(l.clone()) });
+                    for l in self
+                        .lists
+                        .iter()
+                        .filter(|l| &l.space == space && l.folder.as_deref() == Some(f))
+                    {
+                        rows.push(SideRow {
+                            depth: 2,
+                            label: list_label(l),
+                            kind: RowKind::List(l.clone()),
+                        });
                     }
                 }
             }
@@ -346,12 +424,18 @@ impl Board {
     }
 
     fn visible_tasks(&self) -> Vec<&Task> {
-        let all = self.tasks.get(&self.source.key()).map(Vec::as_slice).unwrap_or_default();
+        let all = self
+            .tasks
+            .get(&self.source.key())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         filter_tasks(all, &self.filter, self.who)
     }
 
     fn selected_task(&self) -> Option<Task> {
-        self.table.selected().and_then(|i| self.visible_tasks().get(i).map(|t| (*t).clone()))
+        self.table
+            .selected()
+            .and_then(|i| self.visible_tasks().get(i).map(|t| (*t).clone()))
     }
 
     // ---- input ----
@@ -372,15 +456,27 @@ impl Board {
             return;
         }
         match std::mem::replace(&mut self.modal, Modal::None) {
-            Modal::Agent { task, mode, choices, mut sel } => {
+            Modal::Agent {
+                task,
+                mode,
+                choices,
+                mut sel,
+            } => {
                 match k.code {
                     KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
-                    KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(choices.len().saturating_sub(1)),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        sel = (sel + 1).min(choices.len().saturating_sub(1))
+                    }
                     KeyCode::Enter => return self.choose_repo(task, mode, choices[sel].clone()),
                     KeyCode::Esc | KeyCode::Char('q') => return,
                     _ => {}
                 }
-                self.modal = Modal::Agent { task, mode, choices, sel };
+                self.modal = Modal::Agent {
+                    task,
+                    mode,
+                    choices,
+                    sel,
+                };
                 return;
             }
             Modal::Update { task, update } => {
@@ -391,7 +487,7 @@ impl Board {
                             Ok(()) => format!("discarded the drafted update for {}", task.name),
                             Err(e) => format!("could not discard: {e:#}"),
                         };
-                        self.read_pending();
+                        self.read_state();
                         return;
                     }
                     KeyCode::Esc | KeyCode::Char('q') => return,
@@ -403,12 +499,24 @@ impl Board {
             Modal::Who { choices, mut sel } => {
                 match k.code {
                     KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
-                    KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(choices.len().saturating_sub(1)),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        sel = (sel + 1).min(choices.len().saturating_sub(1))
+                    }
                     KeyCode::Enter => {
                         let (label, who) = choices[sel].clone();
                         // "jd (2)" -> "jd"; everyone needs no label.
-                        let name = label.rsplit_once(" (").map_or(label.as_str(), |(n, _)| n).to_string();
-                        return self.set_who(who, if who == Who::Anyone { String::new() } else { name });
+                        let name = label
+                            .rsplit_once(" (")
+                            .map_or(label.as_str(), |(n, _)| n)
+                            .to_string();
+                        return self.set_who(
+                            who,
+                            if who == Who::Anyone {
+                                String::new()
+                            } else {
+                                name
+                            },
+                        );
                     }
                     KeyCode::Esc | KeyCode::Char('q') => return,
                     _ => {}
@@ -416,20 +524,35 @@ impl Board {
                 self.modal = Modal::Who { choices, sel };
                 return;
             }
-            Modal::Repo { task, mode, agent, choices, mut sel } => {
+            Modal::Repo {
+                task,
+                mode,
+                agent,
+                choices,
+                mut sel,
+            } => {
                 match k.code {
                     KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
-                    KeyCode::Down | KeyCode::Char('j') => sel = (sel + 1).min(choices.len().saturating_sub(1)),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        sel = (sel + 1).min(choices.len().saturating_sub(1))
+                    }
                     KeyCode::Enter => return self.start(task, mode, &agent, &choices[sel]),
                     KeyCode::Esc | KeyCode::Char('q') => return,
                     _ => {}
                 }
-                self.modal = Modal::Repo { task, mode, agent, choices, sel };
+                self.modal = Modal::Repo {
+                    task,
+                    mode,
+                    agent,
+                    choices,
+                    sel,
+                };
                 return;
             }
             Modal::Detail => {
                 match k.code {
                     KeyCode::Char('s') => self.choose_agent(Mode::Spec),
+                    KeyCode::Char('i') => self.implement_selected(),
                     KeyCode::Char('c') => self.choose_agent(Mode::Code),
                     KeyCode::Char('o') => self.open_in_browser(),
                     KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {}
@@ -447,13 +570,20 @@ impl Board {
                 self.status.clear();
                 self.table.select(Some(0));
             }
-            KeyCode::Tab => self.focus = if self.focus == Focus::Side { Focus::Tasks } else { Focus::Side },
+            KeyCode::Tab => {
+                self.focus = if self.focus == Focus::Side {
+                    Focus::Tasks
+                } else {
+                    Focus::Side
+                }
+            }
             KeyCode::Char('/') => {
                 self.filtering = true;
                 self.focus = Focus::Tasks;
             }
             KeyCode::Char('m') if self.me.is_none() => {
-                self.status = "your ClickUp user is not loaded yet; try again in a moment (r reloads)".into();
+                self.status =
+                    "your ClickUp user is not loaded yet; try again in a moment (r reloads)".into();
             }
             KeyCode::Char('m') => match (self.who, self.me) {
                 (Who::Person(id), Some(me)) if id == me => self.set_who(Who::Anyone, String::new()),
@@ -474,10 +604,16 @@ impl Board {
 
     fn side_key(&mut self, code: KeyCode) {
         let rows = self.side_rows();
-        let sel = self.side.selected().unwrap_or(0).min(rows.len().saturating_sub(1));
+        let sel = self
+            .side
+            .selected()
+            .unwrap_or(0)
+            .min(rows.len().saturating_sub(1));
         match code {
             KeyCode::Up | KeyCode::Char('k') => self.side.select(Some(sel.saturating_sub(1))),
-            KeyCode::Down | KeyCode::Char('j') => self.side.select(Some((sel + 1).min(rows.len().saturating_sub(1)))),
+            KeyCode::Down | KeyCode::Char('j') => self
+                .side
+                .select(Some((sel + 1).min(rows.len().saturating_sub(1)))),
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => match rows[sel].kind.clone() {
                 RowKind::Space(s) => toggle(&mut self.expanded, space_key(&s)),
                 RowKind::Folder(key) => toggle(&mut self.expanded, key),
@@ -499,10 +635,13 @@ impl Board {
         let sel = self.table.selected().unwrap_or(0);
         match code {
             KeyCode::Up | KeyCode::Char('k') => self.table.select(Some(sel.saturating_sub(1))),
-            KeyCode::Down | KeyCode::Char('j') => self.table.select(Some((sel + 1).min(n.saturating_sub(1)))),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.table.select(Some((sel + 1).min(n.saturating_sub(1))))
+            }
             KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Side,
             KeyCode::Enter if n > 0 => self.modal = Modal::Detail,
             KeyCode::Char('s') if n > 0 => self.choose_agent(Mode::Spec),
+            KeyCode::Char('i') if n > 0 => self.implement_selected(),
             KeyCode::Char('c') if n > 0 => self.choose_agent(Mode::Code),
             KeyCode::Char('u') => self.review_update(),
             KeyCode::Char('o') => self.open_in_browser(),
@@ -520,10 +659,15 @@ impl Board {
     }
 
     fn review_update(&mut self) {
-        let Some(task) = self.selected_task() else { return };
+        let Some(task) = self.selected_task() else {
+            return;
+        };
         match self.pending.get(&task.id).cloned() {
             Some(update) => self.modal = Modal::Update { task, update },
-            None => self.status = "no drafted ClickUp update for this task (✉ marks the ones with one)".into(),
+            None => {
+                self.status =
+                    "no drafted ClickUp update for this task (✉ marks the ones with one)".into()
+            }
         }
     }
 
@@ -541,24 +685,49 @@ impl Board {
 
     /// Everyone, me, unassigned, then each person in the current list's tasks with their task count.
     fn choose_who(&mut self) {
-        let all = self.tasks.get(&self.source.key()).map(Vec::as_slice).unwrap_or_default();
+        let all = self
+            .tasks
+            .get(&self.source.key())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         let mut choices = vec![(format!("Everyone ({})", all.len()), Who::Anyone)];
         if let Some(me) = self.me {
-            choices.push((format!("Me ({})", all.iter().filter(|t| t.is_assigned_to(me)).count()), Who::Person(me)));
+            choices.push((
+                format!(
+                    "Me ({})",
+                    all.iter().filter(|t| t.is_assigned_to(me)).count()
+                ),
+                Who::Person(me),
+            ));
         }
-        choices.push((format!("Unassigned ({})", all.iter().filter(|t| t.assignees.is_empty()).count()), Who::Nobody));
+        choices.push((
+            format!(
+                "Unassigned ({})",
+                all.iter().filter(|t| t.assignees.is_empty()).count()
+            ),
+            Who::Nobody,
+        ));
         for (a, n) in assignees_in(all) {
             if Some(a.id) != self.me {
-                let name = if a.username.is_empty() { format!("user {}", a.id) } else { a.username };
+                let name = if a.username.is_empty() {
+                    format!("user {}", a.id)
+                } else {
+                    a.username
+                };
                 choices.push((format!("{name} ({n})"), Who::Person(a.id)));
             }
         }
-        let sel = choices.iter().position(|(_, w)| *w == self.who).unwrap_or(0);
+        let sel = choices
+            .iter()
+            .position(|(_, w)| *w == self.who)
+            .unwrap_or(0);
         self.modal = Modal::Who { choices, sel };
     }
 
     fn choose_agent(&mut self, mode: Mode) {
-        let Some(task) = self.selected_task() else { return };
+        let Some(task) = self.selected_task() else {
+            return;
+        };
         if self.starting.contains(&task.id) {
             self.status = format!("{} is already starting", task.name);
             return;
@@ -567,7 +736,12 @@ impl Board {
         if choices.is_empty() {
             self.status = NO_AGENT.into();
         } else {
-            self.modal = Modal::Agent { task, mode, choices, sel: 0 };
+            self.modal = Modal::Agent {
+                task,
+                mode,
+                choices,
+                sel: 0,
+            };
         }
     }
 
@@ -576,7 +750,13 @@ impl Board {
         if choices.is_empty() {
             self.status = NO_REPO.into();
         } else {
-            self.modal = Modal::Repo { task, mode, agent, choices, sel: 0 };
+            self.modal = Modal::Repo {
+                task,
+                mode,
+                agent,
+                choices,
+                sel: 0,
+            };
         }
     }
 
@@ -584,7 +764,11 @@ impl Board {
         if !self.starting.insert(task.id.clone()) {
             return;
         }
-        let what = if mode == Mode::Spec { "writing the spec for" } else { "starting" };
+        let what = if mode == Mode::Spec {
+            "writing the spec for"
+        } else {
+            "starting"
+        };
         self.status = format!("{agent}: {what} {}…", task.name);
         let (cfg, cu, tx) = (self.cfg.clone(), self.cu.clone(), self.tx.clone());
         let (agent, repo) = (agent.to_string(), repo.to_string());
@@ -594,6 +778,33 @@ impl Board {
             let result = app::start(&cfg, &cu, &task, &agent, &repo, mode, &progress);
             let _ = tx.send(Msg::Started(task.id, result));
         });
+    }
+
+    /// `i`: send the apply workflow of the selected task's drafted change to its agent.
+    fn implement_selected(&mut self) {
+        let Some(task) = self.selected_task() else {
+            return;
+        };
+        let Some((pane, link)) = self.links.get(&task.id).cloned() else {
+            self.status =
+                "no OpenSpec change for this task; press s to write the spec first".into();
+            return;
+        };
+        let Some(change) = link.change.clone() else {
+            self.status = "this is a code start; there is no OpenSpec change to implement".into();
+            return;
+        };
+        if link.phase() != Phase::SpecDrafted {
+            self.status = format!(
+                "{} cannot be implemented yet ({})",
+                task.name,
+                link.phase().label()
+            );
+            return;
+        }
+        self.status = format!("sending the apply workflow for {change}…");
+        let tx = self.tx.clone();
+        thread::spawn(move || drop(tx.send(Msg::Implemented(app::implement(&pane, &change)))));
     }
 
     fn open_in_browser(&mut self) {
@@ -607,16 +818,24 @@ impl Board {
     // ---- drawing ----
 
     fn draw(&mut self, f: &mut Frame) {
-        let [main, footer] = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(f.area());
-        let [left, right] = Layout::horizontal([Constraint::Length(36), Constraint::Min(20)]).areas(main);
+        let [main, footer] =
+            Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(f.area());
+        let [left, right] =
+            Layout::horizontal([Constraint::Length(36), Constraint::Min(20)]).areas(main);
         self.draw_side(f, left);
         self.draw_tasks(f, right);
         self.draw_footer(f, footer);
         match &self.modal {
             Modal::None => {}
             Modal::Detail => self.draw_detail(f),
-            Modal::Agent { choices, sel, mode, .. } => {
-                let title = if *mode == Mode::Spec { " Write the spec with which agent? " } else { " Code with which agent? " };
+            Modal::Agent {
+                choices, sel, mode, ..
+            } => {
+                let title = if *mode == Mode::Spec {
+                    " Write the spec with which agent? "
+                } else {
+                    " Code with which agent? "
+                };
                 draw_choices(f, title, choices, *sel)
             }
             Modal::Update { task, update } => draw_update(f, task, update),
@@ -625,7 +844,10 @@ impl Board {
                 draw_choices(f, " Show tasks of ", &labels, *sel)
             }
             Modal::Repo { choices, sel, .. } => {
-                let names: Vec<String> = choices.iter().map(|r| r.rsplit('/').next().unwrap_or(r).to_string()).collect();
+                let names: Vec<String> = choices
+                    .iter()
+                    .map(|r| r.rsplit('/').next().unwrap_or(r).to_string())
+                    .collect();
                 draw_choices(f, " Worktree in which repo? ", &names, *sel)
             }
         }
@@ -641,11 +863,20 @@ impl Board {
                     RowKind::Space(_) => Style::new().add_modifier(Modifier::BOLD),
                     _ => Style::new(),
                 };
-                ListItem::new(Span::styled(format!("{}{}", "  ".repeat(r.depth), r.label), style))
+                ListItem::new(Span::styled(
+                    format!("{}{}", "  ".repeat(r.depth), r.label),
+                    style,
+                ))
             })
             .collect();
-        let title = if self.loading_hierarchy { " Sprints & Lists (loading…) " } else { " Sprints & Lists " };
-        let list = List::new(items).block(panel(title, self.focus == Focus::Side)).highlight_style(highlight());
+        let title = if self.loading_hierarchy {
+            " Sprints & Lists (loading…) "
+        } else {
+            " Sprints & Lists "
+        };
+        let list = List::new(items)
+            .block(panel(title, self.focus == Focus::Side))
+            .highlight_style(highlight());
         f.render_stateful_widget(list, area, &mut self.side);
     }
 
@@ -655,12 +886,26 @@ impl Board {
         let rows: Vec<Row> = tasks
             .iter()
             .map(|t| {
-                let who: Vec<&str> = t.assignees.iter().map(|a| first_name(&a.username)).collect();
+                let who: Vec<&str> = t
+                    .assignees
+                    .iter()
+                    .map(|a| first_name(&a.username))
+                    .collect();
                 let mine = me.is_some_and(|me| t.is_assigned_to(me));
                 Row::new([
                     Cell::from(t.status.clone()).fg(Color::Cyan),
-                    Cell::from(if self.pending.contains_key(&t.id) { format!("✉ {}", t.name) } else { t.name.clone() }),
-                    Cell::from(who.join(", ")).style(if mine { Style::new().fg(Color::Green) } else { Style::new().dim() }),
+                    Cell::from(self.phase_of(&t.id).map(Phase::label).unwrap_or_default())
+                        .fg(Color::Yellow),
+                    Cell::from(if self.pending.contains_key(&t.id) {
+                        format!("✉ {}", t.name)
+                    } else {
+                        t.name.clone()
+                    }),
+                    Cell::from(who.join(", ")).style(if mine {
+                        Style::new().fg(Color::Green)
+                    } else {
+                        Style::new().dim()
+                    }),
                 ])
             })
             .collect();
@@ -674,9 +919,14 @@ impl Board {
             title.push_str(&format!(" · \"{}\"", self.filter));
         }
         title.push_str(if loading { " (loading…) " } else { " " });
-        let widths = [Constraint::Length(16), Constraint::Min(20), Constraint::Length(18)];
+        let widths = [
+            Constraint::Length(16),
+            Constraint::Length(7),
+            Constraint::Min(20),
+            Constraint::Length(18),
+        ];
         let table = Table::new(rows, widths)
-            .header(Row::new(["STATUS", "NAME", "WHO"]).style(Style::new().bold().dim()))
+            .header(Row::new(["STATUS", "PHASE", "NAME", "WHO"]).style(Style::new().bold().dim()))
             .block(panel(&title, self.focus == Focus::Tasks))
             .row_highlight_style(highlight());
         if self.table.selected().is_none_or(|s| s >= count) {
@@ -687,35 +937,71 @@ impl Board {
 
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
         let line = if self.filtering {
-            Line::from(vec![Span::raw(" filter: ").bold(), Span::raw(&self.filter), Span::raw("▏")])
+            Line::from(vec![
+                Span::raw(" filter: ").bold(),
+                Span::raw(&self.filter),
+                Span::raw("▏"),
+            ])
         } else if !self.status.is_empty() {
             Line::from(format!(" {}", self.status)).fg(Color::Yellow)
         } else {
-            Line::from(" ↑↓ move  ⏎ open  s write spec  c code now  u review update ✉  o browser  / filter  m mine  a assignee  r refresh  q quit").dim()
+            let mut help = " ↑↓ move  ⏎ open  s write spec  c code now  u review update ✉  o browser  / filter  m mine  a assignee  r refresh  q quit".to_string();
+            if self.can_implement() {
+                help.push_str("  i implement");
+            }
+            Line::from(help).dim()
         };
         f.render_widget(Paragraph::new(line), area);
     }
 
+    /// True when the selected task has a reviewed spec that is ready to implement.
+    fn can_implement(&self) -> bool {
+        self.selected_task().is_some_and(|t| {
+            self.links
+                .get(&t.id)
+                .is_some_and(|(_, l)| l.change.is_some() && l.phase() == Phase::SpecDrafted)
+        })
+    }
+
     fn draw_detail(&self, f: &mut Frame) {
-        let Some(t) = self.selected_task() else { return };
+        let Some(t) = self.selected_task() else {
+            return;
+        };
         let area = centered(f.area(), 80, 70);
         let who: Vec<&str> = t.assignees.iter().map(|a| a.username.as_str()).collect();
         let text = vec![
             Line::from(t.name.clone()).bold(),
-            Line::from(vec![Span::raw(t.status.clone()).fg(Color::Cyan), Span::raw(format!("  ·  {}", who.join(", ")))]),
+            Line::from(vec![
+                Span::raw(t.status.clone()).fg(Color::Cyan),
+                Span::raw(format!("  ·  {}", who.join(", "))),
+            ]),
             Line::from(t.url.clone()).dim(),
             Line::from(""),
             Line::from(t.description.trim().to_string()),
         ];
         f.render_widget(Clear, area);
-        let block = panel(" Task · s write spec  c code now  o browser  esc close ", true);
-        f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), area);
+        let title = if self.can_implement() {
+            " Task · s write spec  i implement  c code now  o browser  esc close "
+        } else {
+            " Task · s write spec  c code now  o browser  esc close "
+        };
+        let block = panel(title, true);
+        f.render_widget(
+            Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+            area,
+        );
     }
 }
 
 fn draw_choices(f: &mut Frame, title: &str, choices: &[String], sel: usize) {
     let height = choices.len() as u16 + 2;
-    let width = choices.iter().map(|c| c.chars().count()).chain([title.chars().count()]).max().unwrap_or(0) as u16 + 4;
+    let width = choices
+        .iter()
+        .map(|c| c.chars().count())
+        .chain([title.chars().count()])
+        .max()
+        .unwrap_or(0) as u16
+        + 4;
     let full = f.area();
     let area = Rect {
         x: full.width.saturating_sub(width) / 2,
@@ -723,10 +1009,19 @@ fn draw_choices(f: &mut Frame, title: &str, choices: &[String], sel: usize) {
         width: width.min(full.width),
         height: height.min(full.height),
     };
-    let items: Vec<ListItem> = choices.iter().map(|c| ListItem::new(format!(" {c}"))).collect();
-    let list = List::new(items).block(panel(title, true)).highlight_style(highlight());
+    let items: Vec<ListItem> = choices
+        .iter()
+        .map(|c| ListItem::new(format!(" {c}")))
+        .collect();
+    let list = List::new(items)
+        .block(panel(title, true))
+        .highlight_style(highlight());
     f.render_widget(Clear, area);
-    f.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(sel)));
+    f.render_stateful_widget(
+        list,
+        area,
+        &mut ListState::default().with_selected(Some(sel)),
+    );
 }
 
 fn draw_update(f: &mut Frame, task: &Task, update: &Update) {
@@ -738,17 +1033,36 @@ fn draw_update(f: &mut Frame, task: &Task, update: &Update) {
         Line::from(update.comment.clone()),
     ];
     if let Some(s) = &update.status {
-        text.extend([Line::from(""), Line::from("Status:").dim(), Line::from(format!("→ {s}"))]);
+        text.extend([
+            Line::from(""),
+            Line::from("Status:").dim(),
+            Line::from(format!("→ {s}")),
+        ]);
     }
-    text.extend([Line::from(""), Line::from("Nothing is posted until you press Enter.").fg(Color::Yellow)]);
+    text.extend([
+        Line::from(""),
+        Line::from("Nothing is posted until you press Enter.").fg(Color::Yellow),
+    ]);
     f.render_widget(Clear, area);
-    let block = panel(" Drafted ClickUp update · ⏎ post  d discard  esc later ", true);
-    f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), area);
+    let block = panel(
+        " Drafted ClickUp update · ⏎ post  d discard  esc later ",
+        true,
+    );
+    f.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn panel(title: &str, focused: bool) -> Block<'static> {
-    let style = if focused { Style::new().fg(Color::Blue) } else { Style::new().dim() };
-    Block::bordered().title(title.to_string()).border_style(style)
+    let style = if focused {
+        Style::new().fg(Color::Blue)
+    } else {
+        Style::new().dim()
+    };
+    Block::bordered()
+        .title(title.to_string())
+        .border_style(style)
 }
 
 fn highlight() -> Style {
@@ -758,7 +1072,12 @@ fn highlight() -> Style {
 fn centered(area: Rect, pct_w: u16, pct_h: u16) -> Rect {
     let w = area.width * pct_w / 100;
     let h = area.height * pct_h / 100;
-    Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
 }
 
 fn arrow(open: bool) -> &'static str {
