@@ -461,6 +461,57 @@ pub fn post_update(cu: &ClickUp, task_id: &str, update: &Update) -> Result<Strin
     Ok(summary)
 }
 
+/// The text `$EDITOR` opens: the comment, then the status line. The header is dropped on read.
+pub fn edit_text(update: &Update) -> String {
+    format!(
+        "# herdr-clickup draft: edit the comment, then the status line. An empty comment posts only the status.\n\n{}\n\nstatus: {}\n",
+        update.comment.trim_end(),
+        update.status.as_deref().unwrap_or_default()
+    )
+}
+
+/// The draft after an edit. The last `status:` line sets the status, and everything before it is
+/// the comment. A missing or empty status line means no status change.
+pub fn parse_edit(text: &str) -> Update {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = usize::from(
+        lines
+            .first()
+            .is_some_and(|l| l.starts_with("# herdr-clickup draft:")),
+    );
+    let status_at = lines
+        .iter()
+        .rposition(|l| l.trim_start().starts_with("status:"));
+    let (comment_lines, status) = match status_at {
+        Some(i) => (
+            &lines[start.min(i)..i],
+            Some(
+                lines[i]
+                    .trim_start()
+                    .trim_start_matches("status:")
+                    .trim()
+                    .to_string(),
+            ),
+        ),
+        None => (&lines[start..], None),
+    };
+    Update {
+        comment: comment_lines.join("\n").trim().to_string(),
+        status: status.filter(|s| !s.is_empty()),
+    }
+}
+
+/// Saves an edited draft, so the board and the hook see it.
+pub fn save_pending(task_id: &str, update: &Update) -> Result<()> {
+    store::update(|state| {
+        state
+            .panes
+            .values_mut()
+            .filter(|l| l.task_id == task_id)
+            .for_each(|l| l.pending = Some(update.clone()))
+    })
+}
+
 /// Drops the drafted update of every link to `task_id`.
 pub fn clear_pending(task_id: &str) -> Result<()> {
     store::update(|state| {

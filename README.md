@@ -32,8 +32,8 @@ A [herdr](https://herdr.dev) plugin for ClickUp:
   spec start; "implementation done" plus a move to *review* for a code start). **Nothing is posted
   automatically.** The drafted comment lists the branch's commits and changed files for code, or the
   proposal's Why and task count for a spec. On the board the task gets a ✉; press `u` to read the exact
-  comment and status, `⏎` to post it, `d` to discard it, `esc` to decide later. A status-only draft posts
-  no comment.
+  comment and status, `e` to edit it in `$EDITOR` (the edit is saved), `⏎` to post it, `d` to discard
+  it, `esc` to decide later. A status-only draft posts no comment.
 - **Links**: Ctrl-click an `app.clickup.com/t/...` link in a terminal to open the task.
 
 ## Install

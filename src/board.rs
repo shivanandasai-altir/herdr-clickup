@@ -23,6 +23,8 @@ use ratatui::{
 };
 use std::{
     collections::{HashMap, HashSet},
+    fs,
+    process::Command,
     sync::mpsc::{Receiver, Sender, channel},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -168,6 +170,8 @@ struct Board {
     starting: HashSet<String>,
     /// Tasks whose apply workflow is being sent, so a second `i` cannot send it twice.
     implementing: HashSet<String>,
+    /// Set by `e`: the board leaves the TUI, runs the editor, then reopens the update dialog.
+    edit_request: Option<(Task, Update)>,
     quit: bool,
 }
 
@@ -223,6 +227,7 @@ impl Board {
             status: String::new(),
             starting: HashSet::new(),
             implementing: HashSet::new(),
+            edit_request: None,
             links: HashMap::new(),
             pending: HashMap::new(),
             pending_read: std::time::Instant::now() - Duration::from_secs(60),
@@ -247,9 +252,52 @@ impl Board {
                 && k.kind == KeyEventKind::Press
             {
                 self.key(k);
+                if let Some((task, update)) = self.edit_request.take() {
+                    let edited = self.edit(&task, &update);
+                    // The editor ran on the normal screen, so the TUI starts again.
+                    *terminal = ratatui::init();
+                    match edited {
+                        Some(update) => {
+                            self.status = match app::save_pending(&task.id, &update) {
+                                Ok(()) => "saved the edited draft".into(),
+                                Err(e) => format!("could not save the edited draft: {e:#}"),
+                            };
+                            self.read_state();
+                            self.modal = Modal::Update { task, update };
+                        }
+                        None => {
+                            self.status = "the editor closed without a saved draft".into();
+                            self.modal = Modal::Update { task, update };
+                        }
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    /// Opens `$EDITOR` on the draft, on the normal screen. The run loop restores the TUI after.
+    fn edit(&self, task: &Task, update: &Update) -> Option<Update> {
+        // The caller always re-enters the TUI, even when the file cannot be written.
+        ratatui::restore();
+        let path = std::env::temp_dir().join(format!("herdr-clickup-{}.md", task.id));
+        fs::write(&path, app::edit_text(update)).ok()?;
+        let editor = std::env::var("EDITOR")
+            .or_else(|_| std::env::var("VISUAL"))
+            .ok()
+            .filter(|e| !e.trim().is_empty())
+            .unwrap_or_else(|| "vi".into());
+        let quoted = format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(format!("{editor} {quoted}"))
+            .status();
+        let text = fs::read_to_string(&path).ok();
+        let _ = fs::remove_file(&path);
+        match (status, text) {
+            (Ok(s), Some(t)) if s.success() => Some(app::parse_edit(&t)),
+            _ => None,
+        }
     }
 
     // ---- loading ----
@@ -510,6 +558,10 @@ impl Board {
             }
             Modal::Update { task, update } => {
                 match k.code {
+                    KeyCode::Char('e') => {
+                        self.edit_request = Some((task, update));
+                        return;
+                    }
                     KeyCode::Enter => return self.post(task, update),
                     KeyCode::Char('d') => {
                         self.status = match app::clear_pending(&task.id) {
