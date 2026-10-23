@@ -8,6 +8,7 @@ use crate::{
     hook::{Link, Phase, Update},
     store,
     task::{Task, Who, assignees_in, filter_tasks},
+    taskspace,
 };
 use anyhow::Result;
 use ratatui::{
@@ -65,7 +66,11 @@ enum Msg {
     /// An approved update was posted (or failed).
     Posted(Result<String>),
     /// The apply workflow was sent to an agent (or could not be).
-    Implemented(Result<String>),
+    Implemented(String, Result<String>),
+    /// A repo was added to a running task (or could not be).
+    Added(Result<String>),
+    /// A task was closed and its worktrees removed (or could not be).
+    Closed(Result<String>),
 }
 
 #[derive(Clone)]
@@ -103,13 +108,25 @@ enum Modal {
         choices: Vec<(String, Who)>,
         sel: usize,
     },
-    /// Second step of a start: the agent is chosen, now the repo.
+    /// Second step of a start: the agent is chosen, now the repos (space toggles, first hosts a spec).
     Repo {
         task: Task,
         mode: Mode,
         agent: String,
         choices: Vec<String>,
         sel: usize,
+        picked: Vec<bool>,
+    },
+    /// Add one more repo to a running multi-repo task.
+    AddRepo {
+        task: Task,
+        choices: Vec<String>,
+        sel: usize,
+    },
+    /// Close a task: remove every worktree and its task folder.
+    Close {
+        task: Task,
+        preview: app::ClosePreview,
     },
 }
 
@@ -149,6 +166,8 @@ struct Board {
     pending_read: std::time::Instant,
     /// Tasks being started, so a second `s` cannot start a second worktree.
     starting: HashSet<String>,
+    /// Tasks whose apply workflow is being sent, so a second `i` cannot send it twice.
+    implementing: HashSet<String>,
     quit: bool,
 }
 
@@ -203,6 +222,7 @@ impl Board {
             modal: Modal::None,
             status: String::new(),
             starting: HashSet::new(),
+            implementing: HashSet::new(),
             links: HashMap::new(),
             pending: HashMap::new(),
             pending_read: std::time::Instant::now() - Duration::from_secs(60),
@@ -313,9 +333,18 @@ impl Board {
                 self.status = result.unwrap_or_else(|e| format!("posting failed: {e:#}"));
                 self.read_state();
             }
-            Msg::Implemented(result) => {
+            Msg::Implemented(task_id, result) => {
+                self.implementing.remove(&task_id);
                 self.status =
                     result.unwrap_or_else(|e| format!("could not start the implementation: {e:#}"));
+                self.read_state();
+            }
+            Msg::Added(result) => {
+                self.status = result.unwrap_or_else(|e| format!("could not add the repo: {e:#}"));
+                self.read_state();
+            }
+            Msg::Closed(result) => {
+                self.status = result.unwrap_or_else(|e| format!("could not close the task: {e:#}"));
                 self.read_state();
             }
             Msg::Started(task_id, result) => {
@@ -530,13 +559,26 @@ impl Board {
                 agent,
                 choices,
                 mut sel,
+                mut picked,
             } => {
                 match k.code {
                     KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
                     KeyCode::Down | KeyCode::Char('j') => {
                         sel = (sel + 1).min(choices.len().saturating_sub(1))
                     }
-                    KeyCode::Enter => return self.start(task, mode, &agent, &choices[sel]),
+                    KeyCode::Char(' ') => {
+                        if let Some(p) = picked.get_mut(sel) {
+                            *p = !*p;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        let chosen = picked_repos(&choices, &picked);
+                        if chosen.is_empty() {
+                            self.status = "pick at least one repo (space)".into();
+                        } else {
+                            return self.start(task, mode, &agent, chosen);
+                        }
+                    }
                     KeyCode::Esc | KeyCode::Char('q') => return,
                     _ => {}
                 }
@@ -546,7 +588,33 @@ impl Board {
                     agent,
                     choices,
                     sel,
+                    picked,
                 };
+                return;
+            }
+            Modal::AddRepo {
+                task,
+                choices,
+                mut sel,
+            } => {
+                match k.code {
+                    KeyCode::Up | KeyCode::Char('k') => sel = sel.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        sel = (sel + 1).min(choices.len().saturating_sub(1))
+                    }
+                    KeyCode::Enter => return self.add_repo(task, choices[sel].clone()),
+                    KeyCode::Esc | KeyCode::Char('q') => return,
+                    _ => {}
+                }
+                self.modal = Modal::AddRepo { task, choices, sel };
+                return;
+            }
+            Modal::Close { task, preview } => {
+                match k.code {
+                    KeyCode::Enter => return self.close_task(task),
+                    KeyCode::Esc | KeyCode::Char('q') => {}
+                    _ => self.modal = Modal::Close { task, preview },
+                }
                 return;
             }
             Modal::Detail => {
@@ -554,6 +622,8 @@ impl Board {
                     KeyCode::Char('s') => self.choose_agent(Mode::Spec),
                     KeyCode::Char('i') => self.implement_selected(),
                     KeyCode::Char('c') => self.choose_agent(Mode::Code),
+                    KeyCode::Char('A') => self.choose_add_repo(),
+                    KeyCode::Char('X') => self.choose_close(),
                     KeyCode::Char('o') => self.open_in_browser(),
                     KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {}
                     _ => self.modal = Modal::Detail,
@@ -643,6 +713,8 @@ impl Board {
             KeyCode::Char('s') if n > 0 => self.choose_agent(Mode::Spec),
             KeyCode::Char('i') if n > 0 => self.implement_selected(),
             KeyCode::Char('c') if n > 0 => self.choose_agent(Mode::Code),
+            KeyCode::Char('A') if n > 0 => self.choose_add_repo(),
+            KeyCode::Char('X') if n > 0 => self.choose_close(),
             KeyCode::Char('u') => self.review_update(),
             KeyCode::Char('o') => self.open_in_browser(),
             _ => {}
@@ -750,17 +822,20 @@ impl Board {
         if choices.is_empty() {
             self.status = NO_REPO.into();
         } else {
+            let mut picked = vec![false; choices.len()];
+            picked[0] = true;
             self.modal = Modal::Repo {
                 task,
                 mode,
                 agent,
                 choices,
                 sel: 0,
+                picked,
             };
         }
     }
 
-    fn start(&mut self, task: Task, mode: Mode, agent: &str, repo: &str) {
+    fn start(&mut self, task: Task, mode: Mode, agent: &str, repos: Vec<String>) {
         if !self.starting.insert(task.id.clone()) {
             return;
         }
@@ -771,13 +846,62 @@ impl Board {
         };
         self.status = format!("{agent}: {what} {}…", task.name);
         let (cfg, cu, tx) = (self.cfg.clone(), self.cu.clone(), self.tx.clone());
-        let (agent, repo) = (agent.to_string(), repo.to_string());
+        let agent = agent.to_string();
         thread::spawn(move || {
             let progress_tx = tx.clone();
             let progress = move |m: String| drop(progress_tx.send(Msg::Progress(m)));
-            let result = app::start(&cfg, &cu, &task, &agent, &repo, mode, &progress);
+            let result = app::start(&cfg, &cu, &task, &agent, &repos, mode, &progress);
             let _ = tx.send(Msg::Started(task.id, result));
         });
+    }
+
+    /// `A`: add a repo to a running multi-repo task.
+    fn choose_add_repo(&mut self) {
+        let Some(task) = self.selected_task() else {
+            return;
+        };
+        let Some((_, link)) = self.links.get(&task.id).cloned() else {
+            self.status = "this task has no running worktree".into();
+            return;
+        };
+        if link.folder().is_none() {
+            self.status = "only a task started with 2+ repos has a task folder".into();
+            return;
+        }
+        let mut choices = app::repo_options();
+        choices.retain(|r| !link.worktrees.iter().any(|w| &w.repo == r));
+        if choices.is_empty() {
+            self.status = "every open repo is already in this task".into();
+        } else {
+            self.modal = Modal::AddRepo {
+                task,
+                choices,
+                sel: 0,
+            };
+        }
+    }
+
+    fn add_repo(&mut self, task: Task, repo: String) {
+        self.status = format!("adding {} to {}…", taskspace::repo_name(&repo), task.name);
+        let (tx, id) = (self.tx.clone(), task.id);
+        thread::spawn(move || drop(tx.send(Msg::Added(app::add_repo(&id, &repo)))));
+    }
+
+    /// `X`: ask before removing every worktree and the task folder.
+    fn choose_close(&mut self) {
+        let Some(task) = self.selected_task() else {
+            return;
+        };
+        match app::close_preview(&task.id) {
+            Ok(preview) => self.modal = Modal::Close { task, preview },
+            Err(e) => self.status = format!("cannot close {}: {e:#}", task.name),
+        }
+    }
+
+    fn close_task(&mut self, task: Task) {
+        self.status = format!("closing {}…", task.name);
+        let (tx, id) = (self.tx.clone(), task.id);
+        thread::spawn(move || drop(tx.send(Msg::Closed(app::close_task(&id)))));
     }
 
     /// `i`: send the apply workflow of the selected task's drafted change to its agent.
@@ -802,9 +926,13 @@ impl Board {
             );
             return;
         }
+        if !self.implementing.insert(task.id.clone()) {
+            self.status = format!("{} is already starting the implementation", task.name);
+            return;
+        }
         self.status = format!("sending the apply workflow for {change}…");
-        let tx = self.tx.clone();
-        thread::spawn(move || drop(tx.send(Msg::Implemented(app::implement(&pane, &change)))));
+        let (tx, id) = (self.tx.clone(), task.id);
+        thread::spawn(move || drop(tx.send(Msg::Implemented(id, app::implement(&pane, &change)))));
     }
 
     fn open_in_browser(&mut self) {
@@ -843,13 +971,36 @@ impl Board {
                 let labels: Vec<String> = choices.iter().map(|(l, _)| l.clone()).collect();
                 draw_choices(f, " Show tasks of ", &labels, *sel)
             }
-            Modal::Repo { choices, sel, .. } => {
-                let names: Vec<String> = choices
+            Modal::Repo {
+                choices,
+                sel,
+                picked,
+                mode,
+                ..
+            } => {
+                let labels: Vec<String> = choices
                     .iter()
-                    .map(|r| r.rsplit('/').next().unwrap_or(r).to_string())
+                    .zip(picked)
+                    .map(|(r, p)| {
+                        format!(
+                            "[{}] {}",
+                            if *p { "x" } else { " " },
+                            taskspace::repo_name(r)
+                        )
+                    })
                     .collect();
-                draw_choices(f, " Worktree in which repo? ", &names, *sel)
+                let title = if *mode == Mode::Spec {
+                    " Repos for this spec · space pick · first holds the spec · ⏎ start "
+                } else {
+                    " Repos to work in · space pick · ⏎ start "
+                };
+                draw_choices(f, title, &labels, *sel)
             }
+            Modal::AddRepo { choices, sel, .. } => {
+                let names: Vec<String> = choices.iter().map(|r| taskspace::repo_name(r)).collect();
+                draw_choices(f, " Add which repo? ", &names, *sel)
+            }
+            Modal::Close { task, preview } => draw_close(f, task, preview),
         }
     }
 
@@ -945,7 +1096,7 @@ impl Board {
         } else if !self.status.is_empty() {
             Line::from(format!(" {}", self.status)).fg(Color::Yellow)
         } else {
-            let mut help = " ↑↓ move  ⏎ open  s write spec  c code now  u review update ✉  o browser  / filter  m mine  a assignee  r refresh  q quit".to_string();
+            let mut help = " ↑↓ move  ⏎ open  s spec  c code  A add repo  X close  u review ✉  o browser  / filter  m mine  a assignee  r refresh  q quit".to_string();
             if self.can_implement() {
                 help.push_str("  i implement");
             }
@@ -969,21 +1120,34 @@ impl Board {
         };
         let area = centered(f.area(), 80, 70);
         let who: Vec<&str> = t.assignees.iter().map(|a| a.username.as_str()).collect();
-        let text = vec![
+        let mut text = vec![
             Line::from(t.name.clone()).bold(),
             Line::from(vec![
                 Span::raw(t.status.clone()).fg(Color::Cyan),
                 Span::raw(format!("  ·  {}", who.join(", "))),
             ]),
             Line::from(t.url.clone()).dim(),
-            Line::from(""),
-            Line::from(t.description.trim().to_string()),
         ];
+        if let Some((_, link)) = self.links.get(&t.id) {
+            text.push(Line::from(format!("Branch: {}", link.branch)).dim());
+            if !link.worktrees.is_empty() {
+                let repos: Vec<String> = link
+                    .worktrees
+                    .iter()
+                    .map(|w| taskspace::repo_name(&w.repo))
+                    .collect();
+                text.push(Line::from(format!("Repos: {}", repos.join(", "))).dim());
+            }
+            if let Some(folder) = link.folder() {
+                text.push(Line::from(format!("Task folder: {folder}")).dim());
+            }
+        }
+        text.extend([Line::from(""), Line::from(t.description.trim().to_string())]);
         f.render_widget(Clear, area);
         let title = if self.can_implement() {
-            " Task · s write spec  i implement  c code now  o browser  esc close "
+            " Task · s spec  i implement  c code  A add repo  X close  o browser  esc "
         } else {
-            " Task · s write spec  c code now  o browser  esc close "
+            " Task · s spec  c code  A add repo  X close  o browser  esc "
         };
         let block = panel(title, true);
         f.render_widget(
@@ -1054,6 +1218,63 @@ fn draw_update(f: &mut Frame, task: &Task, update: &Update) {
     );
 }
 
+/// The repos the multi-select marked, in the order the picker shows them.
+fn picked_repos(choices: &[String], picked: &[bool]) -> Vec<String> {
+    choices
+        .iter()
+        .zip(picked)
+        .filter(|(_, p)| **p)
+        .map(|(c, _)| c.clone())
+        .collect()
+}
+
+fn draw_close(f: &mut Frame, task: &Task, preview: &app::ClosePreview) {
+    let area = centered(f.area(), 70, 50);
+    let mut text = vec![
+        Line::from(format!("Close \"{}\"?", task.name)).bold(),
+        Line::from(""),
+        Line::from(format!("Branch: {}", preview.branch)).dim(),
+    ];
+    if !preview.worktrees.is_empty() {
+        let repos: Vec<String> = preview
+            .worktrees
+            .iter()
+            .map(|w| taskspace::repo_name(&w.repo))
+            .collect();
+        text.push(Line::from(format!("Removes: {}", repos.join(", "))).dim());
+    }
+    if let Some(folder) = &preview.folder {
+        text.push(Line::from(format!("Removes folder: {folder}")).dim());
+    }
+    if preview.dirty.is_empty() {
+        text.push(Line::from("No uncommitted changes.").fg(Color::Green));
+    } else {
+        let names: Vec<String> = preview
+            .dirty
+            .iter()
+            .map(|r| taskspace::repo_name(r))
+            .collect();
+        text.push(
+            Line::from(format!(
+                "Warning: uncommitted changes in {}.",
+                names.join(", ")
+            ))
+            .fg(Color::Red),
+        );
+    }
+    text.extend([
+        Line::from(""),
+        Line::from("Enter removes every worktree and closes the workspace. This cannot be undone.")
+            .fg(Color::Yellow),
+    ]);
+    f.render_widget(Clear, area);
+    let block = panel(" Close task · ⏎ close  esc cancel ", true);
+    f.render_widget(
+        Paragraph::new(text).block(block).wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn panel(title: &str, focused: bool) -> Block<'static> {
     let style = if focused {
         Style::new().fg(Color::Blue)
@@ -1098,5 +1319,26 @@ fn first_name(username: &str) -> &str {
 fn toggle(set: &mut HashSet<String>, key: String) {
     if !set.remove(&key) {
         set.insert(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::picked_repos;
+
+    #[test]
+    fn multi_select_returns_the_marked_repos_in_picker_order() {
+        let choices = [
+            "/w/webui".to_string(),
+            "/w/api".to_string(),
+            "/w/infra".to_string(),
+        ];
+        assert_eq!(
+            picked_repos(&choices, &[true, false, true]),
+            ["/w/webui", "/w/infra"]
+        );
+        assert!(picked_repos(&choices, &[false, false, false]).is_empty());
+        assert_eq!(picked_repos(&choices, &[true]), ["/w/webui"]);
+        assert!(picked_repos(&choices, &[]).is_empty());
     }
 }

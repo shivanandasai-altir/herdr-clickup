@@ -21,9 +21,27 @@ pub struct Link {
     /// The worktree (or task folder) the agent works in; absent in links written before it existed.
     #[serde(default)]
     pub dir: Option<String>,
+    /// Every repo checkout of the task, host repo first; empty in old links.
+    #[serde(default)]
+    pub worktrees: Vec<RepoWorktree>,
+    /// The task's title and URL, for the generated AGENTS.md.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub url: String,
+    /// The agent kind, so the task folder gets the instruction file that agent reads.
+    #[serde(default)]
+    pub agent: String,
     /// A ClickUp update drafted when the agent finished, waiting for the user to approve or discard it.
     #[serde(default)]
     pub pending: Option<Update>,
+}
+
+/// One repo checkout of a task, and the repo it was made from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RepoWorktree {
+    pub repo: String,
+    pub path: String,
 }
 
 /// The spec-first flow of one task: write the spec, review it, implement it, finish.
@@ -77,6 +95,16 @@ impl Link {
     /// separately: `working` here only says the agent has worked since the last claim.
     pub fn can_implement(&self) -> bool {
         self.change.is_some() && self.phase() == Phase::SpecDrafted
+    }
+
+    /// The task folder of a multi-repo task; `None` for a single worktree or an old link.
+    pub fn folder(&self) -> Option<&str> {
+        let dir = self.dir.as_deref()?;
+        match self.worktrees.first() {
+            Some(w) if w.path == dir => None,
+            Some(_) => Some(dir),
+            None => None,
+        }
     }
 
     /// Moves the link past a report the user has not approved yet.

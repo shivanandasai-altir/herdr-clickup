@@ -83,6 +83,35 @@ pub fn create_worktree(repo: &str, branch: &str, label: &str) -> Result<Worktree
     })
 }
 
+/// Opens a workspace on a folder, for a task whose worktrees live inside it.
+pub fn create_workspace(cwd: &str, label: &str) -> Result<(String, String)> {
+    let r = call(&[
+        "workspace",
+        "create",
+        "--cwd",
+        cwd,
+        "--label",
+        label,
+        "--no-focus",
+    ])?;
+    let field = |p: &str| r.pointer(p).and_then(Value::as_str).map(str::to_string);
+    Ok((
+        field("/workspace/workspace_id")
+            .ok_or_else(|| anyhow!("workspace create: no workspace in {r}"))?,
+        field("/root_pane/pane_id")
+            .ok_or_else(|| anyhow!("workspace create: no root pane in {r}"))?,
+    ))
+}
+
+pub fn close_workspace(workspace_id: &str) -> Result<()> {
+    call(&["workspace", "close", workspace_id]).map(drop)
+}
+
+/// Removes a single worktree workspace and its checkout.
+pub fn remove_worktree_workspace(workspace_id: &str) -> Result<()> {
+    call(&["worktree", "remove", "--workspace", workspace_id, "--force"]).map(drop)
+}
+
 pub fn start_agent(name: &str, kind: &str, pane: &str) -> Result<()> {
     call(&["agent", "start", name, "--kind", kind, "--pane", pane]).map(drop)
 }

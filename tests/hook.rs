@@ -1,4 +1,6 @@
-use herdr_clickup::hook::{Decision, Link, Phase, State, Update, decide, proposed_update};
+use herdr_clickup::hook::{
+    Decision, Link, Phase, RepoWorktree, State, Update, decide, proposed_update,
+};
 use serde_json::json;
 
 fn link(working: bool, reported: bool) -> State {
@@ -11,6 +13,10 @@ fn link(working: bool, reported: bool) -> State {
             change: None,
             phase: None,
             dir: None,
+            worktrees: Vec::new(),
+            title: String::new(),
+            url: String::new(),
+            agent: String::new(),
             working,
             reported,
             pending: None,
@@ -241,6 +247,10 @@ fn implementing_claims_the_next_finish_again() {
         change: Some("c".into()),
         phase: Some(Phase::SpecDrafted),
         dir: None,
+        worktrees: Vec::new(),
+        title: String::new(),
+        url: String::new(),
+        agent: String::new(),
         working: true,
         reported: true,
         pending: Some(Update {
@@ -263,6 +273,10 @@ fn a_report_advances_the_phase() {
         change: Some("c".into()),
         phase: Some(Phase::SpecDrafting),
         dir: None,
+        worktrees: Vec::new(),
+        title: String::new(),
+        url: String::new(),
+        agent: String::new(),
         working: true,
         reported: false,
         pending: None,
@@ -296,6 +310,10 @@ fn implement_needs_a_reviewed_change() {
         change: Some("c".into()),
         phase: Some(Phase::SpecDrafted),
         dir: None,
+        worktrees: Vec::new(),
+        title: String::new(),
+        url: String::new(),
+        agent: String::new(),
         working: false,
         reported: true,
         pending: None,
@@ -311,4 +329,49 @@ fn implement_needs_a_reviewed_change() {
     l.change = None;
     l.phase = Some(Phase::SpecDrafted);
     assert!(!l.can_implement());
+}
+
+fn task_link(dir: &str, paths: &[&str]) -> Link {
+    Link {
+        task_id: "1".into(),
+        branch: "CU-1-fix".into(),
+        change: Some("cu-1-fix".into()),
+        phase: Some(Phase::SpecDrafted),
+        dir: Some(dir.into()),
+        worktrees: paths
+            .iter()
+            .map(|p| RepoWorktree {
+                repo: format!("{p}-repo"),
+                path: p.to_string(),
+            })
+            .collect(),
+        title: "Fix".into(),
+        url: "u".into(),
+        agent: "claude".into(),
+        working: false,
+        reported: true,
+        pending: None,
+    }
+}
+
+#[test]
+fn a_single_worktree_is_not_a_task_folder() {
+    assert_eq!(task_link("/t/CU-1-fix", &["/t/CU-1-fix"]).folder(), None);
+}
+
+#[test]
+fn a_worktree_inside_the_dir_makes_it_a_task_folder() {
+    assert_eq!(
+        task_link("/t/CU-1-fix", &["/t/CU-1-fix/webui"]).folder(),
+        Some("/t/CU-1-fix")
+    );
+}
+
+#[test]
+fn links_with_repos_survive_a_json_round_trip() {
+    let l = task_link("/t/CU-1-fix", &["/t/CU-1-fix/webui", "/t/CU-1-fix/api"]);
+    let text = serde_json::to_string(&l).unwrap();
+    let back: Link = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, l);
+    assert_eq!(back.worktrees.len(), 2);
 }

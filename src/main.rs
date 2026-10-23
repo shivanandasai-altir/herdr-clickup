@@ -99,7 +99,7 @@ fn run(cmd: &str, rest: &[String]) -> Result<()> {
                     &cu,
                     &cu.task(id)?,
                     &agent,
-                    &repo,
+                    &[repo],
                     mode,
                     &|m| println!("{m}")
                 )?
@@ -178,9 +178,15 @@ fn task_menu(cfg: &Config, cu: &ClickUp, task: &Task) -> Result<()> {
     println!("Starting {} in {}…", agents[a], repos[r]);
     println!(
         "{}",
-        app::start(cfg, cu, task, &agents[a], &repos[r], mode, &|m| println!(
-            "{m}"
-        ))?
+        app::start(
+            cfg,
+            cu,
+            task,
+            &agents[a],
+            &[repos[r].clone()],
+            mode,
+            &|m| println!("{m}")
+        )?
     );
     Ok(())
 }
