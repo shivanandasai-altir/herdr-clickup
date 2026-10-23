@@ -4,7 +4,7 @@ use crate::{
     clickup::ClickUp,
     config::Config,
     herdr,
-    hook::Link,
+    hook::{Link, Update},
     repos,
     store,
     openspec,
@@ -93,7 +93,7 @@ pub fn start(
     };
 
     // Linked before the agent starts, so the hook sees its first status change.
-    let link = Link { task_id: task.id.clone(), branch: branch.clone(), change: change.clone(), working: false, reported: false };
+    let link = Link { task_id: task.id.clone(), branch: branch.clone(), change: change.clone(), working: false, reported: false, pending: None };
     store::update(|state| state.panes.insert(wt.pane_id.clone(), link))?;
     if let Err(e) = herdr::start_agent(&agent_name(task), agent, &wt.pane_id) {
         // Usually the agent asking whether to trust the new worktree folder: the user's call, not ours.
@@ -129,6 +129,24 @@ pub fn open_url(url: &str) -> Result<()> {
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     Command::new(opener).arg(url).spawn()?;
     Ok(())
+}
+
+/// Posts an update the user approved: the comment, then the status. Called only from an explicit user action.
+pub fn post_update(cu: &ClickUp, task_id: &str, update: &Update) -> Result<String> {
+    cu.comment(task_id, &update.comment)?;
+    let mut summary = format!("posted the comment on {task_id}");
+    if let Some(warning) = set_status(cu, task_id, update.status.as_deref()) {
+        summary.push_str(&format!(" ({warning})"));
+    } else if let Some(s) = &update.status {
+        summary.push_str(&format!(" and set it to {s}"));
+    }
+    clear_pending(task_id)?;
+    Ok(summary)
+}
+
+/// Drops the drafted update of every link to `task_id`.
+pub fn clear_pending(task_id: &str) -> Result<()> {
+    store::update(|state| state.panes.values_mut().filter(|l| l.task_id == task_id).for_each(|l| l.pending = None))
 }
 
 /// Status names differ per ClickUp space, so a missing one is a warning, not a failure.

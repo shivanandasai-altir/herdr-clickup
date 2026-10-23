@@ -1,12 +1,12 @@
 use anyhow::{anyhow, bail, Result};
 use dialoguer::{FuzzySelect, Select};
 use herdr_clickup::{
-    app::{self, agent_options, client, open_url, repo_options, set_status, Mode, NO_AGENT, NO_REPO},
+    app::{self, agent_options, client, open_url, repo_options, Mode, NO_AGENT, NO_REPO},
     board,
     clickup::ClickUp,
     config::Config,
     herdr,
-    hook::{decide, Decision},
+    hook::{decide, proposed_update, Decision},
     link::task_id_from_url,
     store,
     task::Task,
@@ -122,16 +122,31 @@ fn task_menu(cfg: &Config, cu: &ClickUp, task: &Task) -> Result<()> {
     Ok(())
 }
 
+/// Tracks the agents `start` launched. It never writes to ClickUp: when an agent finishes, it drafts an
+/// update for the user to approve on the board (`u`) and shows a notification.
 fn hook() -> Result<()> {
     let event = serde_json::from_str(&env::var("HERDR_PLUGIN_EVENT_JSON").unwrap_or_default())
         .unwrap_or(serde_json::Value::Null);
-    // Decide and claim under the lock, so two hooks for the same finish cannot both report it.
+    // Only status names are needed here, and only to draft the proposal.
+    let cfg = Config::load().ok();
+    // Decide and claim under the lock, so two hooks for the same finish cannot both draft it.
     let decision = store::update(|state| {
         let d = decide(&event, state);
         match &d {
             Decision::Nothing => {}
             Decision::MarkWorking { pane_id } => state.panes.get_mut(pane_id).into_iter().for_each(|l| l.working = true),
-            Decision::Report { pane_id, .. } => state.panes.get_mut(pane_id).into_iter().for_each(|l| l.reported = true),
+            Decision::Report { pane_id, branch, change, .. } => {
+                let update = proposed_update(
+                    branch,
+                    change.as_deref(),
+                    cfg.as_ref().and_then(|c| c.status_done.as_deref()),
+                    cfg.as_ref().and_then(|c| c.status_spec.as_deref()),
+                );
+                if let Some(l) = state.panes.get_mut(pane_id) {
+                    l.reported = true;
+                    l.pending = Some(update);
+                }
+            }
             Decision::Forget { pane_id } => drop(state.panes.remove(pane_id)),
             Decision::ForgetWorkspace { workspace_id } => {
                 state.panes.retain(|pane, _| pane.split(':').next() != Some(workspace_id.as_str()))
@@ -139,21 +154,12 @@ fn hook() -> Result<()> {
         }
         d
     })?;
-    if let Decision::Report { task_id, branch, change, .. } = decision {
-        let (cfg, cu) = client()?;
-        // A spec-first start ends with a spec to review, not finished work.
-        let (comment, status) = match &change {
-            Some(c) => (
-                format!("Spec drafted: OpenSpec change `{c}` on branch `{branch}` is ready for review."),
-                cfg.status_spec.as_deref(),
-            ),
-            None => (format!("herdr agent finished its turn on branch `{branch}`."), cfg.status_done.as_deref()),
-        };
-        cu.comment(&task_id, &comment)?;
-        if let Some(warning) = set_status(&cu, &task_id, status) {
-            eprintln!("warning: {warning}");
-        }
-        herdr::notify("ClickUp task updated", &format!("{task_id}: agent done on {branch}"));
+    if let Decision::Report { task_id, change, .. } = decision {
+        let what = if change.is_some() { "spec drafted" } else { "agent finished" };
+        herdr::notify(
+            &format!("ClickUp {task_id}: {what}"),
+            "A ClickUp update is drafted. Review it on the ClickUp board (u); nothing is posted until you approve it.",
+        );
     }
     Ok(())
 }

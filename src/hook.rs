@@ -15,6 +15,31 @@ pub struct Link {
     pub working: bool,
     #[serde(default)]
     pub reported: bool,
+    /// A ClickUp update drafted when the agent finished, waiting for the user to approve or discard it.
+    #[serde(default)]
+    pub pending: Option<Update>,
+}
+
+/// A ClickUp change the plugin proposes. It is only ever posted on the user's explicit approval.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Update {
+    pub comment: String,
+    pub status: Option<String>,
+}
+
+/// What to propose when the agent on `branch` finishes: "spec drafted" for a spec start (`change` set),
+/// "finished" plus the done status for a code start.
+pub fn proposed_update(branch: &str, change: Option<&str>, status_done: Option<&str>, status_spec: Option<&str>) -> Update {
+    match change {
+        Some(c) => Update {
+            comment: format!("Spec drafted: OpenSpec change `{c}` on branch `{branch}` is ready for review."),
+            status: status_spec.map(str::to_string),
+        },
+        None => Update {
+            comment: format!("herdr agent finished its turn on branch `{branch}`."),
+            status: status_done.map(str::to_string),
+        },
+    }
 }
 
 /// Plugin state: pane id → link. Persisted as JSON in the plugin state dir.

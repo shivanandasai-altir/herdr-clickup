@@ -4,7 +4,7 @@ A [herdr](https://herdr.dev) plugin for ClickUp:
 
 - **Board** (`prefix+u`): a tab with your current sprints and every space → folder → list on the left,
   and the selected list's tasks on the right.
-  `↑↓`/`jk` move · `⏎` open/expand · `s` write spec · `c` code now · `o` open in browser · `/` filter · `m` only mine ·
+  `↑↓`/`jk` move · `⏎` open/expand · `s` write spec · `c` code now · `u` review a drafted update (✉) · `o` open in browser · `/` filter · `m` only mine ·
   `a` pick an assignee (everyone, me, unassigned, or anyone in the list) ·
   `tab` switch side · `r` refresh · `q` quit.
 - **My tasks** (`prefix+shift+u`): a quick fuzzy picker over your open tasks, in a popup.
@@ -18,8 +18,10 @@ A [herdr](https://herdr.dev) plugin for ClickUp:
   coding; the task moves to *in progress*.
 - If the agent asks something at startup (e.g. "trust this folder?"), answer it in the new
   workspace; the plugin waits and then sends the task. It never answers for you.
-- **Report back**: when the agent finishes its turn, comments on the task: "spec drafted" for a spec
-  start, or "finished" plus a move to *review* for a code start.
+- **Report back, only with your approval**: when the agent finishes its turn, the plugin drafts a
+  ClickUp update ("spec drafted" for a spec start; "finished" plus a move to *review* for a code start)
+  and shows a herdr notification. **Nothing is posted automatically.** On the board the task gets a ✉;
+  press `u` to read the exact comment and status, `⏎` to post it, `d` to discard it, `esc` to decide later.
 - **Links**: Ctrl-click an `app.clickup.com/t/...` link in a terminal to open the task.
 
 ## Install

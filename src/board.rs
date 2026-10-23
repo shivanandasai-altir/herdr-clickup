@@ -5,6 +5,8 @@ use crate::{
     clickup::ClickUp,
     config::Config,
     hierarchy::{current_sprints, ListRef},
+    hook::Update,
+    store,
     task::{assignees_in, filter_tasks, Task, Who},
 };
 use anyhow::Result;
@@ -58,6 +60,8 @@ enum Msg {
     Started(String, Result<String>),
     /// Something the user must do for a start that is still running.
     Progress(String),
+    /// An approved update was posted (or failed).
+    Posted(Result<String>),
 }
 
 #[derive(Clone)]
@@ -80,6 +84,8 @@ enum Modal {
     Detail,
     /// Holds the task itself: the table can reload while the modal is open.
     Agent { task: Task, mode: Mode, choices: Vec<String>, sel: usize },
+    /// A drafted ClickUp update, shown in full; posted only on Enter.
+    Update { task: Task, update: Update },
     /// Whose tasks to show: everyone, me, unassigned, or one person.
     Who { choices: Vec<(String, Who)>, sel: usize },
     /// Second step of a start: the agent is chosen, now the repo.
@@ -115,6 +121,9 @@ struct Board {
     who_label: String,
     modal: Modal,
     status: String,
+    /// Drafted ClickUp updates by task id, waiting for approval; reread from the state file.
+    pending: HashMap<String, Update>,
+    pending_read: std::time::Instant,
     /// Tasks being started, so a second `s` cannot start a second worktree.
     starting: HashSet<String>,
     quit: bool,
@@ -168,6 +177,8 @@ impl Board {
             modal: Modal::None,
             status: String::new(),
             starting: HashSet::new(),
+            pending: HashMap::new(),
+            pending_read: std::time::Instant::now() - Duration::from_secs(60),
             quit: false,
         };
         b.load_hierarchy();
@@ -177,6 +188,9 @@ impl Board {
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.quit {
+            if self.pending_read.elapsed() > Duration::from_secs(1) {
+                self.read_pending();
+            }
             terminal.draw(|f| self.draw(f))?;
             while let Ok(msg) = self.rx.try_recv() {
                 self.receive(msg);
@@ -263,6 +277,10 @@ impl Board {
                 }
             }
             Msg::Progress(m) => self.status = m,
+            Msg::Posted(result) => {
+                self.status = result.unwrap_or_else(|e| format!("posting failed: {e:#}"));
+                self.read_pending();
+            }
             Msg::Started(task_id, result) => {
                 self.starting.remove(&task_id);
                 self.status = match result {
@@ -271,6 +289,15 @@ impl Board {
                 };
             }
         }
+    }
+
+    fn read_pending(&mut self) {
+        self.pending_read = std::time::Instant::now();
+        self.pending = store::read()
+            .panes
+            .into_values()
+            .filter_map(|l| Some((l.task_id, l.pending?)))
+            .collect();
     }
 
     fn done_refreshing(&mut self) {
@@ -354,6 +381,23 @@ impl Board {
                     _ => {}
                 }
                 self.modal = Modal::Agent { task, mode, choices, sel };
+                return;
+            }
+            Modal::Update { task, update } => {
+                match k.code {
+                    KeyCode::Enter => return self.post(task, update),
+                    KeyCode::Char('d') => {
+                        self.status = match app::clear_pending(&task.id) {
+                            Ok(()) => format!("discarded the drafted update for {}", task.name),
+                            Err(e) => format!("could not discard: {e:#}"),
+                        };
+                        self.read_pending();
+                        return;
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => return,
+                    _ => {}
+                }
+                self.modal = Modal::Update { task, update };
                 return;
             }
             Modal::Who { choices, mut sel } => {
@@ -460,6 +504,7 @@ impl Board {
             KeyCode::Enter if n > 0 => self.modal = Modal::Detail,
             KeyCode::Char('s') if n > 0 => self.choose_agent(Mode::Spec),
             KeyCode::Char('c') if n > 0 => self.choose_agent(Mode::Code),
+            KeyCode::Char('u') => self.review_update(),
             KeyCode::Char('o') => self.open_in_browser(),
             _ => {}
         }
@@ -472,6 +517,20 @@ impl Board {
         self.source = source;
         self.table.select(Some(0));
         self.focus = Focus::Tasks;
+    }
+
+    fn review_update(&mut self) {
+        let Some(task) = self.selected_task() else { return };
+        match self.pending.get(&task.id).cloned() {
+            Some(update) => self.modal = Modal::Update { task, update },
+            None => self.status = "no drafted ClickUp update for this task (✉ marks the ones with one)".into(),
+        }
+    }
+
+    fn post(&mut self, task: Task, update: Update) {
+        self.status = format!("posting to {}…", task.name);
+        let (cu, tx) = (self.cu.clone(), self.tx.clone());
+        thread::spawn(move || drop(tx.send(Msg::Posted(app::post_update(&cu, &task.id, &update)))));
     }
 
     fn set_who(&mut self, who: Who, label: String) {
@@ -560,6 +619,7 @@ impl Board {
                 let title = if *mode == Mode::Spec { " Write the spec with which agent? " } else { " Code with which agent? " };
                 draw_choices(f, title, choices, *sel)
             }
+            Modal::Update { task, update } => draw_update(f, task, update),
             Modal::Who { choices, sel } => {
                 let labels: Vec<String> = choices.iter().map(|(l, _)| l.clone()).collect();
                 draw_choices(f, " Show tasks of ", &labels, *sel)
@@ -599,7 +659,7 @@ impl Board {
                 let mine = me.is_some_and(|me| t.is_assigned_to(me));
                 Row::new([
                     Cell::from(t.status.clone()).fg(Color::Cyan),
-                    Cell::from(t.name.clone()),
+                    Cell::from(if self.pending.contains_key(&t.id) { format!("✉ {}", t.name) } else { t.name.clone() }),
                     Cell::from(who.join(", ")).style(if mine { Style::new().fg(Color::Green) } else { Style::new().dim() }),
                 ])
             })
@@ -631,7 +691,7 @@ impl Board {
         } else if !self.status.is_empty() {
             Line::from(format!(" {}", self.status)).fg(Color::Yellow)
         } else {
-            Line::from(" ↑↓ move  ⏎ open  s write spec  c code now  o browser  / filter  m mine  a assignee  r refresh  q quit").dim()
+            Line::from(" ↑↓ move  ⏎ open  s write spec  c code now  u review update ✉  o browser  / filter  m mine  a assignee  r refresh  q quit").dim()
         };
         f.render_widget(Paragraph::new(line), area);
     }
@@ -667,6 +727,23 @@ fn draw_choices(f: &mut Frame, title: &str, choices: &[String], sel: usize) {
     let list = List::new(items).block(panel(title, true)).highlight_style(highlight());
     f.render_widget(Clear, area);
     f.render_stateful_widget(list, area, &mut ListState::default().with_selected(Some(sel)));
+}
+
+fn draw_update(f: &mut Frame, task: &Task, update: &Update) {
+    let area = centered(f.area(), 70, 50);
+    let mut text = vec![
+        Line::from(format!("Post this to ClickUp task \"{}\"?", task.name)).bold(),
+        Line::from(""),
+        Line::from("Comment:").dim(),
+        Line::from(update.comment.clone()),
+    ];
+    if let Some(s) = &update.status {
+        text.extend([Line::from(""), Line::from("Status:").dim(), Line::from(format!("→ {s}"))]);
+    }
+    text.extend([Line::from(""), Line::from("Nothing is posted until you press Enter.").fg(Color::Yellow)]);
+    f.render_widget(Clear, area);
+    let block = panel(" Drafted ClickUp update · ⏎ post  d discard  esc later ", true);
+    f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: false }), area);
 }
 
 fn panel(title: &str, focused: bool) -> Block<'static> {

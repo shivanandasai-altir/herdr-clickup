@@ -20,6 +20,12 @@ pub fn update<T>(change: impl FnOnce(&mut State) -> T) -> Result<T> {
     Ok(out)
 }
 
+/// The current state without taking the lock (writes are atomic renames), for display.
+pub fn read() -> State {
+    let Ok(dir) = dir() else { return State::default() };
+    fs::read_to_string(dir.join("panes.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
 /// A one-line choice remembered between runs (`agent`, `repo`), offered first next time.
 pub fn last(name: &str) -> Option<String> {
     fs::read_to_string(dir().ok()?.join(name)).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())

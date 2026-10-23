@@ -1,11 +1,11 @@
-use herdr_clickup::hook::{decide, Decision, Link, State};
+use herdr_clickup::hook::{decide, proposed_update, Decision, Link, State, Update};
 use serde_json::json;
 
 fn link(working: bool, reported: bool) -> State {
     let mut s = State::default();
     s.panes.insert(
         "w3:t1:p1".into(),
-        Link { task_id: "86c1abcd".into(), branch: "CU-86c1abcd-fix-login".into(), change: None, working, reported },
+        Link { task_id: "86c1abcd".into(), branch: "CU-86c1abcd-fix-login".into(), change: None, working, reported, pending: None },
     );
     s
 }
@@ -119,5 +119,21 @@ fn a_spec_start_reports_with_its_change() {
             branch: "CU-86c1abcd-fix-login".into(),
             change: Some("cu-86c1abcd-fix-login".into()),
         }
+    );
+}
+
+#[test]
+fn a_finished_spec_start_proposes_a_spec_drafted_update() {
+    assert_eq!(
+        proposed_update("CU-86a-x", Some("cu-86a-x"), Some("review"), None),
+        Update { comment: "Spec drafted: OpenSpec change `cu-86a-x` on branch `CU-86a-x` is ready for review.".into(), status: None }
+    );
+}
+
+#[test]
+fn a_finished_code_start_proposes_finished_and_the_done_status() {
+    assert_eq!(
+        proposed_update("CU-86a-x", None, Some("review"), Some("spec review")),
+        Update { comment: "herdr agent finished its turn on branch `CU-86a-x`.".into(), status: Some("review".into()) }
     );
 }
