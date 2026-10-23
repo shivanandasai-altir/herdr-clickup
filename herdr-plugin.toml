@@ -23,7 +23,7 @@ command = ["sh", "bin/run.sh", "link"]
 [[link_handlers]]
 id = "task-url"
 title = "Open ClickUp task"
-pattern = "^https://app\\.clickup\\.com/t/[A-Za-z0-9/_-]+"
+pattern = "^https://app\\.clickup\\.com/t/[A-Za-z0-9/-]+"
 action = "link"
 
 [[events]]

@@ -75,3 +75,9 @@ pub fn agent_prompt(t: &Task) -> String {
         d => format!("{head}\n\n{d}"),
     }
 }
+
+/// `cu-<id>`, fitted to herdr's agent name rule `[a-z][a-z0-9_-]{0,31}`.
+pub fn agent_name(t: &Task) -> String {
+    let id: String = t.id.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    format!("cu-{id}").chars().take(32).collect()
+}

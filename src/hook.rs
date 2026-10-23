@@ -7,6 +7,9 @@ use std::collections::BTreeMap;
 pub struct Link {
     pub task_id: String,
     pub branch: String,
+    /// The agent has been seen working, so a later idle/done is the end of its turn.
+    #[serde(default)]
+    pub working: bool,
     #[serde(default)]
     pub reported: bool,
 }
@@ -20,6 +23,8 @@ pub struct State {
 #[derive(Debug, PartialEq)]
 pub enum Decision {
     Nothing,
+    /// The agent took the prompt: from now on idle/done means it finished.
+    MarkWorking { pane_id: String },
     /// The agent finished: tell ClickUp, then mark the link reported.
     Report { pane_id: String, task_id: String, branch: String },
     /// The pane is gone: drop its link.
@@ -36,11 +41,19 @@ pub fn decide(event: &Value, state: &State) -> Decision {
     };
     let status = event.pointer("/data/agent_status").and_then(Value::as_str);
     match event.get("event").and_then(Value::as_str) {
-        Some("pane.agent_status_changed") if status == Some("done") && !link.reported => Decision::Report {
+        Some("pane.agent_status_changed") if status == Some("working") && !link.working => {
+            Decision::MarkWorking { pane_id: pane_id.to_string() }
+        }
+        // idle is a finish herdr has already shown the user; done is one nobody has seen yet.
+        Some("pane.agent_status_changed")
+            if matches!(status, Some("idle" | "done")) && link.working && !link.reported =>
+        {
+            Decision::Report {
             pane_id: pane_id.to_string(),
             task_id: link.task_id.clone(),
-            branch: link.branch.clone(),
-        },
+                branch: link.branch.clone(),
+            }
+        }
         Some("pane.closed") => Decision::Forget { pane_id: pane_id.to_string() },
         _ => Decision::Nothing,
     }

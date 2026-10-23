@@ -104,3 +104,20 @@ mod prompt {
         assert_eq!(agent_prompt(&task("abc", "Fix login", "  ")), "Work on ClickUp task abc: Fix login\nhttps://app.clickup.com/t/abc");
     }
 }
+
+mod agent {
+    use super::task;
+    use herdr_clickup::task::agent_name;
+
+    // herdr requires agent names to match [a-z][a-z0-9_-]{0,31}.
+    #[test]
+    fn is_a_lowercase_herdr_name() {
+        assert_eq!(agent_name(&task("86C1ABCD", "Fix login", "")), "cu-86c1abcd");
+    }
+
+    #[test]
+    fn drops_characters_herdr_rejects_and_caps_at_32() {
+        assert_eq!(agent_name(&task("ABC.123/x", "", "")), "cu-abc123x");
+        assert_eq!(agent_name(&task(&"a".repeat(40), "", "")).len(), 32);
+    }
+}

@@ -7,7 +7,7 @@ use herdr_clickup::{
     hook::{decide, Decision, Link},
     link::task_id_from_url,
     store,
-    task::{agent_prompt, branch_name, Task},
+    task::{agent_name, agent_prompt, branch_name, Task},
 };
 use std::{env, io::BufRead, process::Command};
 
@@ -99,15 +99,12 @@ fn start(cfg: &Config, cu: &ClickUp, task: &Task) -> Result<()> {
     let branch = branch_name(task);
     println!("Creating worktree {branch}…");
     let wt = herdr::create_worktree(&branch, &task.name)?;
+    // Linked before the agent starts, so the hook sees its first status change.
+    let link = Link { task_id: task.id.clone(), branch: branch.clone(), working: false, reported: false };
+    store::update(|state| state.panes.insert(wt.pane_id.clone(), link))?;
     println!("Starting {} in {}…", cfg.agent, wt.pane_id);
-    herdr::start_agent(&branch, &cfg.agent, &wt.pane_id)?;
+    herdr::start_agent(&agent_name(task), &cfg.agent, &wt.pane_id)?;
     herdr::prompt_agent(&wt.pane_id, &agent_prompt(task))?;
-
-    let mut state = store::load();
-    state
-        .panes
-        .insert(wt.pane_id.clone(), Link { task_id: task.id.clone(), branch: branch.clone(), reported: false });
-    store::save(&state)?;
 
     set_status(cu, &task.id, cfg.status_started.as_deref());
     herdr::notify("ClickUp task started", &format!("{} → {}", task.name, wt.workspace_id));
@@ -117,25 +114,24 @@ fn start(cfg: &Config, cu: &ClickUp, task: &Task) -> Result<()> {
 fn hook() -> Result<()> {
     let event = serde_json::from_str(&env::var("HERDR_PLUGIN_EVENT_JSON").unwrap_or_default())
         .unwrap_or(serde_json::Value::Null);
-    let mut state = store::load();
-    match decide(&event, &state) {
-        Decision::Nothing => Ok(()),
-        Decision::Forget { pane_id } => {
-            state.panes.remove(&pane_id);
-            store::save(&state)
+    // Decide and claim under the lock, so two hooks for the same finish cannot both report it.
+    let decision = store::update(|state| {
+        let d = decide(&event, state);
+        match &d {
+            Decision::Nothing => {}
+            Decision::MarkWorking { pane_id } => state.panes.get_mut(pane_id).into_iter().for_each(|l| l.working = true),
+            Decision::Report { pane_id, .. } => state.panes.get_mut(pane_id).into_iter().for_each(|l| l.reported = true),
+            Decision::Forget { pane_id } => drop(state.panes.remove(pane_id)),
         }
-        Decision::Report { pane_id, task_id, branch } => {
-            let (cfg, cu) = client()?;
-            cu.comment(&task_id, &format!("herdr agent finished its turn on branch `{branch}`."))?;
-            set_status(&cu, &task_id, cfg.status_done.as_deref());
-            if let Some(link) = state.panes.get_mut(&pane_id) {
-                link.reported = true;
-            }
-            store::save(&state)?;
-            herdr::notify("ClickUp task updated", &format!("{task_id}: agent done on {branch}"));
-            Ok(())
-        }
+        d
+    })?;
+    if let Decision::Report { task_id, branch, .. } = decision {
+        let (cfg, cu) = client()?;
+        cu.comment(&task_id, &format!("herdr agent finished its turn on branch `{branch}`."))?;
+        set_status(&cu, &task_id, cfg.status_done.as_deref());
+        herdr::notify("ClickUp task updated", &format!("{task_id}: agent done on {branch}"));
     }
+    Ok(())
 }
 
 /// Status names differ per ClickUp space, so a missing one is a warning, not a failure.
